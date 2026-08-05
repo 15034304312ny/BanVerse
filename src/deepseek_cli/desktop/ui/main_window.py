@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QThread, QTimer
+from PySide6.QtCore import Qt, QThread
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -39,8 +37,6 @@ from ...tts import TtsProfile, read_tts_profile
 from ..ai_features import (
     PROACTIVE_SYSTEM_SUFFIX,
     ProactiveMessageScheduler,
-    ReplyPlan,
-    ReplySegment,
     classify_role_reply,
     enrich_role_image_prompt,
     explicit_image_request_prompt,
@@ -48,17 +44,14 @@ from ..ai_features import (
     serialize_reply_segments,
 )
 from ..assets import AvatarError, import_chat_image
-from ..background import (
-    AutonomousImageRunner,
-    SummaryRunner,
-    launch_worker,
-)
+from ..background import AutonomousImageRunner, SummaryRunner
 from ..builtin_characters import BuiltinCharacterManager
 from ..data.repositories import (
     CharacterRepository,
     ChatRepository,
     SettingsRepository,
 )
+from ..flow import MessageFlowController, ReplyDelivery
 from ..image_service import (
     DEFAULT_GRSAI_IMAGE_MODEL,
     DEFAULT_GRSAI_IMAGE_SIZE,
@@ -73,7 +66,6 @@ from ..platform import is_android_platform
 from ..security.credentials import CredentialStore
 from ..stickers import sticker_by_id
 from ..theme import stylesheet
-from ..workers import ChatWorker
 from .conversation_edit_dialog import ConversationEditDialog
 from .pages.characters_page import CharactersPage
 from .pages.chat_page import ChatPage
@@ -83,16 +75,6 @@ from .pages.settings_page import SettingsPage
 if TYPE_CHECKING:
     from ..notification_sound import NotificationSound
     from ..tts import SpeechController
-
-
-@dataclass(frozen=True, slots=True)
-class _ReplyDelivery:
-    conversation_id: str
-    turn_id: str
-    plan: ReplyPlan
-    profile: TtsProfile
-    reasoning: str
-    request_kind: str
 
 
 class MainWindow(QMainWindow):
@@ -120,28 +102,12 @@ class MainWindow(QMainWindow):
         self._speech: SpeechController | None = None
         self._notification_sound: NotificationSound | None = None
         self._shutting_down = False
-        self._notification_pending = False
-        self._pending_delivery: _ReplyDelivery | None = None
-        self._delivery: _ReplyDelivery | None = None
-        self._delivery_segments: deque[tuple[int, ReplySegment]] = deque()
-        self._delivery_reasoning = ""
-        self._delivery_speech_started = False
-        self._delivery_timer = QTimer(self)
-        self._delivery_timer.setSingleShot(True)
-        self._delivery_timer.timeout.connect(self._deliver_next_segment)
         self._conversation_id: str | None = None
-        self._turn_id: str | None = None
-        self._thread: QThread | None = None
-        self._worker: ChatWorker | None = None
-        self._request_conversation_id: str | None = None
-        self._request_kind = "user"
-        # 流式期间的累积正文与推理；正文仅供测试观测（业务完成事件使用
-        # 信号参数），推理则用于回填思考过程。
-        self._answer = ""
-        self._reasoning = ""
         self._proactive = ProactiveMessageScheduler(settings, self)
         self._summary_runner: SummaryRunner | None = None
         self._image_runner: AutonomousImageRunner | None = None
+        self._flow: MessageFlowController | None = None
+        self._active_delivery: ReplyDelivery | None = None
         self._mobile = is_android_platform()
         self._mobile_body: QStackedWidget | None = None
 
@@ -312,6 +278,23 @@ class MainWindow(QMainWindow):
             media_root=self._media_root,
             parent=self,
         )
+        self._flow = MessageFlowController(
+            settings=self._settings,
+            tts_auto_play_check=lambda: self._settings.get_bool(
+                "tts_auto_play", True
+            ),
+            parent=self,
+        )
+        self._flow.image_described.connect(self._on_flow_image_described)
+        self._flow.turn_completed.connect(self._on_turn_completed)
+        self._flow.turn_aborted.connect(self._on_turn_aborted)
+        self._flow.stream_cleaned_up.connect(self._on_stream_cleaned_up)
+        self._flow.delivery_started.connect(self._on_delivery_started)
+        self._flow.delivery_typing.connect(self._on_delivery_typing)
+        self._flow.delivery_segment.connect(self._on_delivery_segment)
+        self._flow.delivery_speech.connect(self._on_delivery_speech)
+        self._flow.delivery_notification.connect(self._play_notification)
+        self._flow.delivery_finished.connect(self._on_delivery_finished)
         self._proactive.start()
         self._enqueue_pending_summaries()
 
@@ -326,6 +309,24 @@ class MainWindow(QMainWindow):
         """后台发图线程（测试等待其空闲时读取）。"""
 
         return self._image_runner.thread if self._image_runner else None
+
+    @property
+    def _thread(self) -> QThread | None:
+        """主管线线程（测试等待其空闲时读取）。"""
+
+        return self._flow.thread if self._flow else None
+
+    @property
+    def _delivery(self) -> ReplyDelivery | None:
+        """主管线投递状态（测试等待其空闲时读取）。"""
+
+        return self._flow.delivery if self._flow else None
+
+    @property
+    def _answer(self) -> str:
+        """流式累积正文；仅供测试观测。"""
+
+        return self._flow.answer if self._flow else ""
 
     def set_audio_services(
         self,
@@ -436,7 +437,7 @@ class MainWindow(QMainWindow):
         *,
         force_reload: bool = False,
     ) -> None:
-        if self._thread is not None or self._delivery is not None:
+        if self._flow is not None and self._flow.busy:
             return
         conversation = self._chats.get_conversation(conversation_id)
         if conversation is None:
@@ -474,11 +475,7 @@ class MainWindow(QMainWindow):
         image_source: str = "",
         sticker_id: str = "",
     ) -> None:
-        if (
-            self._thread is not None
-            or self._pending_delivery is not None
-            or self._delivery is not None
-        ):
+        if self._flow is not None and self._flow.busy:
             return
         api_key = self._text_api_key()
         if not api_key:
@@ -542,13 +539,7 @@ class MainWindow(QMainWindow):
             user_image_path=image_path,
             user_sticker=sticker.id if sticker is not None else "",
         )
-        self._turn_id = turn.id
-        self._request_conversation_id = conversation.id
-        self._request_kind = "user"
-        self._notification_pending = False
         self._chats.mark_streaming(turn.id)
-        self._answer = ""
-        self._reasoning = ""
         self.chat_page.add_user_message(
             text,
             image_path,
@@ -557,72 +548,34 @@ class MainWindow(QMainWindow):
         self.chat_page.set_generating(True)
         self._proactive.schedule_next()
 
-        self._start_chat_worker(
-            api_key,
-            conversation.model,
-            history,
-            text,
-            system_prompt=character_prompt.system if character_prompt else "",
+        service = self._create_text_service(api_key)
+        image_service = (
+            self._create_image_service()
+            if image_path and self._image_api_key()
+            else None
+        )
+        self._flow.begin_stream(
+            service=service,
+            model=conversation.model,
+            history=history,
+            request_text=text,
+            system_prompt=(
+                character_prompt.system if character_prompt else ""
+            ),
             example_messages=(
                 character_prompt.examples if character_prompt else ()
             ),
+            image_service=image_service,
             image_path=image_path,
             temperature=(
                 self._roleplay_temperature()
                 if character is not None and conversation.model == MODEL_CHAT
                 else None
             ),
+            turn_id=turn.id,
+            conversation_id=conversation.id,
+            request_kind="user",
         )
-
-    def _start_chat_worker(
-        self,
-        api_key: str,
-        model: str,
-        history,
-        request_text: str,
-        *,
-        system_prompt: str = "",
-        example_messages=(),
-        image_path: str = "",
-        temperature: float | None = None,
-    ) -> None:
-        service = self._create_text_service(api_key)
-        self._worker = ChatWorker(
-            service,
-            model,
-            history,
-            request_text,
-            system_prompt=system_prompt,
-            example_messages=example_messages,
-            temperature=temperature,
-            image_service=(
-                self._create_image_service()
-                if image_path and self._image_api_key()
-                else None
-            ),
-            image_path=image_path,
-        )
-        self._worker.reasoning.connect(self._on_reasoning)
-        self._worker.content.connect(self._on_content)
-        self._worker.completed.connect(self._on_completed)
-        self._worker.cancelled.connect(self._on_cancelled)
-        self._worker.failed.connect(self._on_failed)
-        self._worker.image_described.connect(self._on_image_described)
-        self._worker.image_analysis_failed.connect(
-            self._on_image_analysis_failed
-        )
-        self._thread = launch_worker(
-            self, self._worker, thread_finished=self._stream_finished
-        )
-
-    def _on_image_described(self, description: str) -> None:
-        if self._turn_id:
-            self._chats.set_user_image_description(
-                self._turn_id, description
-            )
-
-    def _on_image_analysis_failed(self, _error_code: str) -> None:
-        """看图失败时继续文本回复；气泡会由实际回复替换等待提示。"""
 
     def _text_provider(self) -> str:
         provider = self._settings.get("text_provider", "deepseek").lower()
@@ -766,8 +719,7 @@ class MainWindow(QMainWindow):
         self.conversations.refresh(select_id=self._conversation_id)
         if (
             conversation_id == self._conversation_id
-            and self._thread is None
-            and self._delivery is None
+            and not (self._flow is not None and self._flow.busy)
         ):
             self._open_conversation(conversation_id, force_reload=True)
         self._play_notification()
@@ -780,255 +732,170 @@ class MainWindow(QMainWindow):
         if conversation_id == self._conversation_id:
             self.chat_page.add_image_error(error_code)
 
-    def _on_reasoning(self, text: str) -> None:
-        self._reasoning += text
+    def _on_flow_image_described(self, turn_id: str, description: str) -> None:
+        """图片理解结果落库；空描述（服务异常时）容错忽略。"""
 
-    def _on_content(self, text: str) -> None:
-        self._answer += text
+        if not turn_id:
+            return
+        try:
+            self._chats.set_user_image_description(turn_id, description)
+        except ValueError:
+            return
 
-    def _on_completed(self, answer: str) -> None:
-        conversation_id = self._request_conversation_id
-        if self._turn_id and conversation_id:
-            plan = classify_role_reply(answer)
-            visible_answer = plan.visible_text or answer.strip()
-            try:
-                self._chats.complete_turn(
-                    self._turn_id,
-                    visible_answer,
-                    self._reasoning,
-                    assistant_segments_json=serialize_reply_segments(
-                        plan.segments
-                    ),
-                )
-            except KeyError:
-                # 会话在流式生成期间被删除（外键级联删除了轮次）：
-                # 放弃本轮投递，避免在排队槽中抛出未捕获异常。
-                self._pending_delivery = None
-                self._notification_pending = False
-                self._turn_id = None
-                return
-            self._enqueue_summary(conversation_id, visible_answer)
-            conversation = self._chats.get_conversation(conversation_id)
-            character = (
-                self._characters.get(conversation.character_id)
-                if conversation and conversation.character_id
-                else None
+    def _on_turn_completed(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        answer: str,
+        reasoning: str,
+        request_kind: str,
+    ) -> None:
+        plan = classify_role_reply(answer)
+        visible_answer = plan.visible_text or answer.strip()
+        try:
+            self._chats.complete_turn(
+                turn_id,
+                visible_answer,
+                reasoning,
+                assistant_segments_json=serialize_reply_segments(
+                    plan.segments
+                ),
             )
-            fallback_prompt = ""
-            image_segment_index: int | None = None
-            if character is not None and plan.has_image_action:
-                for index, segment in enumerate(plan.segments):
-                    if segment.kind == "image" and segment.prompt:
-                        fallback_prompt = enrich_role_image_prompt(
-                            character.name,
-                            character.card,
-                            segment.prompt,
-                        )
-                        image_segment_index = index
-                        break
-            turn = self._chats.get_turn(conversation_id, self._turn_id)
-            explicit_prompt = explicit_image_request_prompt(
-                turn.user_content if turn is not None else ""
+        except KeyError:
+            # 会话在流式生成期间被删除（外键级联删除了轮次）：
+            # 放弃本轮投递，避免在排队槽中抛出未捕获异常。
+            return
+        self._enqueue_summary(conversation_id, visible_answer)
+        conversation = self._chats.get_conversation(conversation_id)
+        character = (
+            self._characters.get(conversation.character_id)
+            if conversation and conversation.character_id
+            else None
+        )
+        fallback_prompt = ""
+        image_segment_index: int | None = None
+        if character is not None and plan.has_image_action:
+            for index, segment in enumerate(plan.segments):
+                if segment.kind == "image" and segment.prompt:
+                    fallback_prompt = enrich_role_image_prompt(
+                        character.name,
+                        character.card,
+                        segment.prompt,
+                    )
+                    image_segment_index = index
+                    break
+        turn = self._chats.get_turn(conversation_id, turn_id)
+        explicit_prompt = explicit_image_request_prompt(
+            turn.user_content if turn is not None else ""
+        )
+        if character is not None and explicit_prompt and not fallback_prompt:
+            fallback_prompt = enrich_role_image_prompt(
+                character.name,
+                character.card,
+                explicit_prompt,
             )
-            if character is not None and explicit_prompt and not fallback_prompt:
-                fallback_prompt = enrich_role_image_prompt(
-                    character.name,
-                    character.card,
-                    explicit_prompt,
-                )
-            if character is not None:
-                self._enqueue_autonomous_image(
-                    conversation_id,
-                    self._turn_id,
-                    character.name,
-                    character.card,
-                    visible_answer,
-                    fallback_prompt=fallback_prompt,
-                    segment_index=image_segment_index,
-                )
-            profile = read_tts_profile(character.card if character else None)
-            self._pending_delivery = _ReplyDelivery(
+        if character is not None:
+            self._enqueue_autonomous_image(
                 conversation_id,
-                self._turn_id,
+                turn_id,
+                character.name,
+                character.card,
+                visible_answer,
+                fallback_prompt=fallback_prompt,
+                segment_index=image_segment_index,
+            )
+        profile = read_tts_profile(character.card if character else None)
+        self._flow.prepare_delivery(
+            ReplyDelivery(
+                conversation_id,
+                turn_id,
                 plan,
                 profile,
-                self._reasoning,
-                self._request_kind,
+                reasoning,
+                request_kind,
             )
-            self._notification_pending = True
+        )
 
-    def _on_cancelled(self) -> None:
-        self._pending_delivery = None
-        self._notification_pending = False
-        if self._turn_id:
-            if self._request_kind == "proactive":
-                self._chats.delete_turn(self._turn_id)
-            else:
-                self._chats.fail_turn(self._turn_id, "cancelled")
+    def _on_turn_aborted(
+        self, turn_id: str, request_kind: str, error_code: str
+    ) -> None:
+        if not turn_id:
+            return
+        if request_kind == "proactive":
+            self._chats.delete_turn(turn_id)
+        elif error_code:
+            self._chats.fail_turn(turn_id, "failed", error_code)
+        else:
+            self._chats.fail_turn(turn_id, "cancelled")
 
-    def _on_failed(self, error_code: str) -> None:
-        self._pending_delivery = None
-        self._notification_pending = False
-        if self._turn_id:
-            if self._request_kind == "proactive":
-                self._chats.delete_turn(self._turn_id)
-            else:
-                self._chats.fail_turn(self._turn_id, "failed", error_code)
-
-    def _stream_finished(self) -> None:
-        request_conversation_id = self._request_conversation_id
-        request_kind = self._request_kind
-        visible_conversation_id = self._conversation_id
-        pending_delivery = self._pending_delivery
-        self._pending_delivery = None
-        if self._worker is not None:
-            self._worker.deleteLater()
-        if self._thread is not None:
-            self._thread.deleteLater()
-        self._worker = None
-        self._thread = None
-        self._turn_id = None
-        self._request_conversation_id = None
-        self._request_kind = "user"
-        self.conversations.refresh(select_id=visible_conversation_id)
+    def _on_stream_cleaned_up(
+        self,
+        request_kind: str,
+        request_conversation_id: str,
+        pending_delivery: ReplyDelivery | None,
+    ) -> None:
+        self.conversations.refresh(select_id=self._conversation_id)
         if pending_delivery is not None:
             self.chat_page.discard_stream()
-            if pending_delivery.conversation_id == visible_conversation_id:
-                self._start_reply_delivery(pending_delivery)
+            if pending_delivery.conversation_id == self._conversation_id:
+                self._flow.begin_delivery(pending_delivery)
             else:
                 self.chat_page.finish_stream()
-                if self._notification_pending:
-                    self._play_notification()
-                self._notification_pending = False
+                self._flow.play_pending_notification()
                 if (
                     pending_delivery.request_kind == "proactive"
                     and not self.isActiveWindow()
                 ):
                     QApplication.alert(self, 5_000)
             return
-
         self.chat_page.finish_stream()
         if (
             request_conversation_id
-            and request_conversation_id == visible_conversation_id
+            and request_conversation_id == self._conversation_id
         ):
             self._open_conversation(
                 request_conversation_id, force_reload=True
             )
-        self._notification_pending = False
         if request_kind == "proactive" and not self.isActiveWindow():
             QApplication.alert(self, 5_000)
 
-    def _start_reply_delivery(self, delivery: _ReplyDelivery) -> None:
-        """把完整回复按真人聊天节奏逐条投递到消息列表。"""
-
-        self._delivery = delivery
-        self._delivery_segments = deque(
-            (index, segment)
-            for index, segment in enumerate(delivery.plan.segments)
-            if segment.kind in {"dialogue", "narration"} and segment.text
-        )
-        self._delivery_reasoning = delivery.reasoning
-        self._delivery_speech_started = False
+    def _on_delivery_started(self, delivery: ReplyDelivery) -> None:
+        self._active_delivery = delivery
         self.chat_page.set_generating(True)
-        if self._delivery_segments:
-            self.chat_page.show_typing_indicator()
-            self._delivery_timer.start(
-                self._reply_delay_ms(
-                    self._delivery_segments[0][1],
-                    first=True,
-                )
-            )
-        else:
-            self._finish_reply_delivery()
-
-    def _deliver_next_segment(self) -> None:
-        delivery = self._delivery
-        if delivery is None:
-            return
-        if delivery.conversation_id != self._conversation_id:
-            self._finish_reply_delivery()
-            return
-        if not self._delivery_segments:
-            self._finish_reply_delivery()
-            return
-        index, segment = self._delivery_segments.popleft()
         self.chat_page.discard_stream()
-        message_key = f"turn:{delivery.turn_id}:segment:{index}"
+
+    def _on_delivery_typing(self, show: bool) -> None:
+        if show:
+            self.chat_page.show_typing_indicator()
+
+    def _on_delivery_segment(
+        self, index: int, segment, reasoning: str
+    ) -> None:
+        delivery = self._active_delivery
+        self.chat_page.discard_stream()
         self.chat_page.add_assistant_segment(
             segment.text,
-            message_key=message_key,
+            message_key=(
+                f"turn:{delivery.turn_id}:segment:{index}"
+                if delivery is not None
+                else ""
+            ),
             speech_enabled=segment.kind == "dialogue",
             narration=segment.kind == "narration",
-            reasoning=self._delivery_reasoning,
+            reasoning=reasoning,
         )
-        self._delivery_reasoning = ""
-        if self._notification_pending:
-            self._play_notification()
-            self._notification_pending = False
-        if (
-            not self._delivery_speech_started
-            and segment.kind == "dialogue"
-            and delivery.plan.dialogue_text
-            and self._speech is not None
-            and self._settings.get_bool("tts_auto_play", True)
-        ):
-            self._delivery_speech_started = True
-            self._speech.speak(
-                message_key,
-                delivery.plan.dialogue_text,
-                delivery.profile,
-            )
-        if self._delivery_segments:
-            next_segment = self._delivery_segments[0][1]
-            self.chat_page.show_typing_indicator()
-            self._delivery_timer.start(
-                self._reply_delay_ms(next_segment)
-            )
-        else:
-            self._finish_reply_delivery()
 
-    @staticmethod
-    def _reply_delay_ms(
-        segment: ReplySegment,
-        *,
-        first: bool = False,
-    ) -> int:
-        """按下一段内容估算真人组织和输入消息所需的等待时间。"""
+    def _on_delivery_speech(
+        self, message_key: str, text: str, profile: TtsProfile
+    ) -> None:
+        if self._speech is not None:
+            self._speech.speak(message_key, text, profile)
 
-        text = segment.text.strip()
-        characters = min(len(text), 100)
-        punctuation = sum(
-            text.count(symbol)
-            for symbol in "，,。！？!?；;：:…"
-        )
-        base = 760 if first else 480
-        per_character = 24 if segment.kind == "dialogue" else 18
-        jitter = sum(ord(character) for character in text[:24]) % 260
-        estimated = (
-            base
-            + characters * per_character
-            + min(punctuation, 8) * 85
-            + jitter
-        )
-        minimum = 900 if first else 650
-        maximum = 3_200 if first else 2_800
-        return max(minimum, min(estimated, maximum))
-
-    def _finish_reply_delivery(self) -> None:
-        delivery = self._delivery
-        if delivery is None:
-            return
-        self._delivery_timer.stop()
-        self._delivery = None
-        self._delivery_segments.clear()
-        self._delivery_reasoning = ""
+    def _on_delivery_finished(self, delivery: ReplyDelivery) -> None:
+        self._active_delivery = None
         self.chat_page.discard_stream()
         self.chat_page.finish_stream()
         self.conversations.refresh(select_id=self._conversation_id)
-        if self._notification_pending:
-            self._play_notification()
-        self._notification_pending = False
         if delivery.conversation_id == self._conversation_id:
             turn = self._chats.get_turn(
                 delivery.conversation_id, delivery.turn_id
@@ -1043,11 +910,8 @@ class MainWindow(QMainWindow):
     def _send_proactive_message(self) -> None:
         """让当前角色会话在随机计时到期后主动开启话题。"""
 
-        if (
-            self._thread is not None
-            or self._delivery is not None
-            or self._pending_delivery is not None
-            or self._conversation_id is None
+        if (self._flow is not None and self._flow.busy) or (
+            self._conversation_id is None
         ):
             return
         api_key = self._text_api_key()
@@ -1076,13 +940,7 @@ class MainWindow(QMainWindow):
         turn = self._chats.create_proactive_turn(
             conversation.id, conversation.model
         )
-        self._turn_id = turn.id
-        self._request_conversation_id = conversation.id
-        self._request_kind = "proactive"
-        self._notification_pending = False
         self._chats.mark_streaming(turn.id)
-        self._answer = ""
-        self._reasoning = ""
         self.chat_page.add_assistant_stream()
         self.chat_page.set_generating(True)
         system_prompt = "\n\n".join(
@@ -1090,11 +948,11 @@ class MainWindow(QMainWindow):
             for part in (character_prompt.system, PROACTIVE_SYSTEM_SUFFIX)
             if part.strip()
         )
-        self._start_chat_worker(
-            api_key,
-            conversation.model,
-            history,
-            proactive_request(
+        self._flow.begin_stream(
+            service=self._create_text_service(api_key),
+            model=conversation.model,
+            history=history,
+            request_text=proactive_request(
                 character.name,
                 current_time=current_time,
             ),
@@ -1105,6 +963,9 @@ class MainWindow(QMainWindow):
                 if conversation.model == MODEL_CHAT
                 else None
             ),
+            turn_id=turn.id,
+            conversation_id=conversation.id,
+            request_kind="proactive",
         )
 
     def _enqueue_summary(self, conversation_id: str, answer: str) -> None:
@@ -1165,8 +1026,8 @@ class MainWindow(QMainWindow):
             self._speech.stop()
 
     def _stop(self) -> None:
-        if self._worker is not None:
-            self._worker.cancel()
+        if self._flow is not None:
+            self._flow.stop()
 
     def _change_model(self, model: str) -> None:
         if self._conversation_id:
@@ -1178,7 +1039,7 @@ class MainWindow(QMainWindow):
             self._edit_conversation(self._conversation_id)
 
     def _edit_conversation(self, conversation_id: str) -> None:
-        if self._thread is not None or self._delivery is not None:
+        if self._flow is not None and self._flow.busy:
             return
         conversation = self._chats.get_conversation(conversation_id)
         if conversation is None:
@@ -1245,11 +1106,7 @@ class MainWindow(QMainWindow):
     def _busy_generating(self) -> bool:
         """主消息管线或分段投递进行中；这些状态下删除会话会破坏落库。"""
 
-        return (
-            self._thread is not None
-            or self._delivery is not None
-            or self._pending_delivery is not None
-        )
+        return self._flow is not None and self._flow.busy
 
     def _credentials_updated(self) -> None:
         if self._text_api_key() and not self._chats.list_conversations():
@@ -1269,20 +1126,13 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._shutting_down = True
         self._proactive.stop()
-        self._delivery_timer.stop()
-        self._delivery = None
-        self._pending_delivery = None
-        self._delivery_segments.clear()
         self.settings_page.shutdown_model_refresh()
         if self._notification_sound is not None:
             self._notification_sound.shutdown()
         if self._speech is not None:
             self._speech.shutdown()
-        if self._worker is not None:
-            self._worker.cancel()
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait(1500)
+        if self._flow is not None:
+            self._flow.shutdown()
         if self._summary_runner is not None:
             self._summary_runner.shutdown()
         if self._image_runner is not None:

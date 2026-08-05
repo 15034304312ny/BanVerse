@@ -139,9 +139,15 @@ def test_reply_delay_grows_with_next_segment_length():
         text="我刚走到楼下，外面正好下起小雨，等我把伞撑开再慢慢跟你说。",
     )
 
-    first_delay = MainWindow._reply_delay_ms(short, first=True)
-    short_delay = MainWindow._reply_delay_ms(short)
-    long_delay = MainWindow._reply_delay_ms(long)
+    first_delay = main_window_module.MessageFlowController._reply_delay_ms(
+        short, first=True
+    )
+    short_delay = main_window_module.MessageFlowController._reply_delay_ms(
+        short
+    )
+    long_delay = main_window_module.MessageFlowController._reply_delay_ms(
+        long
+    )
 
     assert 900 <= first_delay <= 3_200
     assert 650 <= short_delay <= 2_800
