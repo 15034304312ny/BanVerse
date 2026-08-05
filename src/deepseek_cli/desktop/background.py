@@ -126,12 +126,9 @@ class SummaryRunner(QObject):
         if character is not None and self._settings.get_bool(
             "role_memory_enabled", True
         ):
-            completed = [
-                turn
-                for turn in self._chats.list_turns(conversation_id)
-                if turn.status == "completed"
-            ]
-            user_text = completed[-1].user_content if completed else ""
+            user_text = self._chats.latest_completed_user_text(
+                conversation_id
+            )
             job = SummaryJob(
                 conversation_id,
                 role_memory_request(
@@ -297,13 +294,10 @@ class AutonomousImageRunner(QObject):
         return self._settings.get_bool("autonomous_images_enabled", True)
 
     def _recently_shared_image(self, conversation_id: str) -> bool:
-        completed = [
-            turn
-            for turn in self._chats.list_turns(conversation_id)
-            if turn.status == "completed"
-        ]
         # 当前轮次加前三个已完成轮次构成冷却窗口，避免角色连续刷图。
-        return any(turn.assistant_image_path for turn in completed[-4:])
+        return self._chats.recent_window_has_assistant_image(
+            conversation_id, window=4
+        )
 
     def enqueue(
         self,

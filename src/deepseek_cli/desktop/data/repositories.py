@@ -485,6 +485,63 @@ class ChatRepository:
         ).fetchone()
         return Turn(**dict(row)) if row else None
 
+    def _completed_turns(
+        self, conversation_id: str, *, max_turns: int | None = None
+    ) -> list[Turn]:
+        """只查询已完成的轮次，避免全表装载后在 Python 侧过滤。
+
+        需要最近 N 条时用子查询先逆序取 N 条再正序返回，保持原有
+        ``turns[-max_turns:]`` 的语义与时间顺序。
+        """
+
+        columns = (
+            "id, conversation_id, user_content, assistant_content, "
+            "reasoning_content, model, status, error_code, created_at, "
+            "origin, user_image_path, user_image_description, "
+            "assistant_image_path, user_sticker, assistant_segments_json"
+        )
+        base = (
+            f"SELECT {columns}, rowid AS _rowid FROM turns "
+            "WHERE conversation_id = ? AND status = 'completed'"
+        )
+        limit = max(0, int(max_turns)) if max_turns is not None else None
+        if limit:
+            rows = self._db.execute(
+                f"SELECT {columns} FROM ({base} ORDER BY created_at DESC, "
+                "_rowid DESC LIMIT ?) ORDER BY created_at, _rowid",
+                (conversation_id, limit),
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                f"SELECT {columns} FROM ({base} ORDER BY created_at, _rowid)",
+                (conversation_id,),
+            ).fetchall()
+        return [Turn(**dict(row)) for row in rows]
+
+    def recent_window_has_assistant_image(
+        self, conversation_id: str, *, window: int = 4
+    ) -> bool:
+        """最近 N 个已完成轮次中是否已生成过图片（自主发图冷却窗口）。"""
+
+        rows = self._db.execute(
+            """SELECT assistant_image_path FROM turns
+               WHERE conversation_id = ? AND status = 'completed'
+               ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+            (conversation_id, max(1, int(window))),
+        ).fetchall()
+        return any(row["assistant_image_path"] for row in rows)
+
+    def latest_completed_user_text(self, conversation_id: str) -> str:
+        """最近一个已完成轮次的用户消息（角色连续性状态回填用）。"""
+
+        row = self._db.execute(
+            """SELECT user_content FROM turns
+               WHERE conversation_id = ? AND status = 'completed'
+               ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+            (conversation_id,),
+        ).fetchone()
+        return row["user_content"] if row else ""
+
     def completed_history(
         self, conversation_id: str, *, max_turns: int | None = None
     ) -> list[Message]:
@@ -492,14 +549,9 @@ class ChatRepository:
         history = []
         if conversation and conversation.opening_message:
             history.append(Message("assistant", conversation.opening_message))
-        turns = [
-            turn
-            for turn in self.list_turns(conversation_id)
-            if turn.status == "completed"
-        ]
-        if max_turns is not None:
-            limit = max(0, int(max_turns))
-            turns = turns[-limit:] if limit else []
+        turns = self._completed_turns(
+            conversation_id, max_turns=max_turns
+        )
         for turn in turns:
             if turn.origin in {"user", "image_generation"}:
                 user_parts = []
