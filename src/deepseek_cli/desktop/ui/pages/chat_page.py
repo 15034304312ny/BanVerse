@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QScroller,
     QVBoxLayout,
     QWidget,
 )
@@ -131,6 +132,13 @@ class ChatPage(QWidget):
         self.messages_layout.setSpacing(0)
         self.messages_layout.addStretch(1)
         self.scroll.setWidget(self.messages)
+        # 布局激活（气泡插入、移除、宽度变化）会更新滚动条 range；在
+        # maximum 变真后若正钉在底部则补滚到真实最大，避免"旧值欠滚"
+        # 导致新回复落到视口下方（QTBUG-35250，Android 上被放大）。
+        self._pin_to_bottom = False
+        self.scroll.verticalScrollBar().rangeChanged.connect(
+            self._on_scroll_range_changed
+        )
         self.scroll.viewport().installEventFilter(self)
         layout.addWidget(self.scroll, 1)
 
@@ -291,6 +299,9 @@ class ChatPage(QWidget):
 
         if self._stream_bubble is not None:
             self.messages_layout.removeWidget(self._stream_bubble)
+            # 与 _clear_messages 一致：先在 Android 组合器外隐藏再销毁，
+            # 避免被移除的气泡在销毁前短暂上浮为原生顶层窗口并干扰几何。
+            self._stream_bubble.hide()
             self._stream_bubble.deleteLater()
             self._stream_bubble = None
 
@@ -384,7 +395,16 @@ class ChatPage(QWidget):
             bubble.set_speech_state(state)
 
     def _update_bubble_widths(self) -> None:
+        """按视口宽度更新气泡宽度；仅在宽度真正变化时执行。
+
+        Android 上软键盘/insets 变化会触发大量 viewport Resize，宽度不变
+        时全量重排会改变文本换行与气泡高度、让滚动条不跟随而加剧顶漂。
+        """
+
         viewport_width = self.scroll.viewport().width()
+        if viewport_width == getattr(self, "_last_viewport_width", -1):
+            return
+        self._last_viewport_width = viewport_width
         for index in range(self.messages_layout.count() - 1):
             widget = self.messages_layout.itemAt(index).widget()
             if isinstance(widget, MessageBubble):
@@ -418,4 +438,26 @@ class ChatPage(QWidget):
 
     def _scroll_to_bottom(self) -> None:
         bar = self.scroll.verticalScrollBar()
+        if self._mobile:
+            # 停掉可能仍在进行的 QScroller 惯性动画，避免其覆盖 setValue。
+            scroller = QScroller.scroller(self.scroll.viewport())
+            if (
+                scroller is not None
+                and scroller.state() != QScroller.State.Inactive
+            ):
+                scroller.stop()
+        # 布局激活前 maximum() 可能过时（QTBUG-35250）；若当前贴底则记
+        # 标志，等 rangeChanged 在布局激活后补滚到真实最大。
+        if bar.maximum() - bar.value() <= 160:
+            self._pin_to_bottom = True
         bar.setValue(bar.maximum())
+
+    def _on_scroll_range_changed(self, _minimum: int, maximum: int) -> None:
+        """布局激活、滚动条 range 更新后，若仍钉在底部则补滚到真实最大。"""
+
+        if not self._pin_to_bottom:
+            return
+        self._pin_to_bottom = False
+        bar = self.scroll.verticalScrollBar()
+        if bar.maximum() - bar.value() <= 160:
+            bar.setValue(maximum)
