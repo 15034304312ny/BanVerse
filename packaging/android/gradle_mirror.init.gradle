@@ -1,0 +1,25 @@
+def addAndroidMirrors = { repositories ->
+    repositories.maven {
+        url = uri("https://maven.aliyun.com/repository/google")
+    }
+    repositories.maven {
+        url = uri("https://maven.aliyun.com/repository/central")
+    }
+    repositories.maven {
+        url = uri("https://maven.aliyun.com/repository/gradle-plugin")
+    }
+}
+
+gradle.beforeProject { project ->
+    addAndroidMirrors(project.buildscript.repositories)
+    addAndroidMirrors(project.repositories)
+}
+
+settingsEvaluated { settings ->
+    addAndroidMirrors(settings.pluginManagement.repositories)
+    if (settings.hasProperty("dependencyResolutionManagement")) {
+        addAndroidMirrors(
+            settings.dependencyResolutionManagement.repositories
+        )
+    }
+}
