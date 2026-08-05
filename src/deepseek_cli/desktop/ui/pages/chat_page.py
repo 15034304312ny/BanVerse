@@ -286,15 +286,6 @@ class ChatPage(QWidget):
         self._stream_bubble = self._add_bubble("assistant", "")
         self._scroll_to_bottom()
 
-    def append_content(self, text: str) -> None:
-        if self._stream_bubble is not None:
-            self._stream_bubble.append_content(text)
-            self._scroll_if_near_bottom()
-
-    def append_reasoning(self, text: str) -> None:
-        if self._stream_bubble is not None:
-            self._stream_bubble.append_reasoning(text)
-
     def discard_stream(self) -> None:
         """移除等待气泡，但保持输入区锁定直到分段投递结束。"""
 

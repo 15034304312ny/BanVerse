@@ -627,12 +627,7 @@ class ProactiveMessageScheduler(QObject):
 
     @property
     def enabled(self) -> bool:
-        return self._settings.get("proactive_enabled", "false").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        return self._settings.get_bool("proactive_enabled", False)
 
     @property
     def next_delay_ms(self) -> int | None:

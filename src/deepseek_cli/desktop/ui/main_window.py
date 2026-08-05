@@ -166,6 +166,8 @@ class MainWindow(QMainWindow):
         self._image_worker: ChatWorker | ImageGenerationWorker | None = None
         self._image_job: _AutonomousImageJob | None = None
         self._image_decision = AutonomousImageDecision()
+        # 流式期间的累积正文与推理；正文仅供测试观测（业务完成事件使用
+        # 信号参数），推理则用于回填思考过程。
         self._answer = ""
         self._reasoning = ""
         self._proactive = ProactiveMessageScheduler(settings, self)
@@ -692,13 +694,6 @@ class MainWindow(QMainWindow):
             "get_siliconflow_image_api_key", "get_siliconflow_api_key"
         )
 
-    def _siliconflow_api_key(self) -> str:
-        """Legacy test/plugin compatibility; runtime uses capability keys."""
-
-        return self._credential_value(
-            "get_siliconflow_image_api_key", "get_siliconflow_api_key"
-        )
-
     def _create_image_service(self):
         provider = self._image_provider()
         api_key = self._image_api_key()
@@ -737,9 +732,7 @@ class MainWindow(QMainWindow):
         return factory(api_key, **kwargs)
 
     def _autonomous_images_enabled(self) -> bool:
-        return self._settings.get(
-            "autonomous_images_enabled", "true"
-        ).lower() in {"1", "true", "yes", "on"}
+        return self._settings.get_bool("autonomous_images_enabled", True)
 
     def _recently_shared_image(self, conversation_id: str) -> bool:
         completed = [
@@ -809,13 +802,8 @@ class MainWindow(QMainWindow):
         while self._image_queue:
             job = self._image_queue.popleft()
             conversation = self._chats.get_conversation(job.conversation_id)
-            turn = next(
-                (
-                    item
-                    for item in self._chats.list_turns(job.conversation_id)
-                    if item.id == job.turn_id
-                ),
-                None,
+            turn = self._chats.get_turn(
+                job.conversation_id, job.turn_id
             )
             can_decide = bool(
                 job.decision_request and self._text_api_key()
@@ -999,14 +987,7 @@ class MainWindow(QMainWindow):
                         )
                         image_segment_index = index
                         break
-            turn = next(
-                (
-                    item
-                    for item in self._chats.list_turns(conversation_id)
-                    if item.id == self._turn_id
-                ),
-                None,
-            )
+            turn = self._chats.get_turn(conversation_id, self._turn_id)
             explicit_prompt = explicit_image_request_prompt(
                 turn.user_content if turn is not None else ""
             )
@@ -1153,8 +1134,7 @@ class MainWindow(QMainWindow):
             and segment.kind == "dialogue"
             and delivery.plan.dialogue_text
             and self._speech is not None
-            and self._settings.get("tts_auto_play", "true").lower()
-            in {"1", "true", "yes", "on"}
+            and self._settings.get_bool("tts_auto_play", True)
         ):
             self._delivery_speech_started = True
             self._speech.speak(
@@ -1213,15 +1193,8 @@ class MainWindow(QMainWindow):
             self._play_notification()
         self._notification_pending = False
         if delivery.conversation_id == self._conversation_id:
-            turn = next(
-                (
-                    item
-                    for item in self._chats.list_turns(
-                        delivery.conversation_id
-                    )
-                    if item.id == delivery.turn_id
-                ),
-                None,
+            turn = self._chats.get_turn(
+                delivery.conversation_id, delivery.turn_id
             )
             if turn is not None and turn.assistant_image_path:
                 self._open_conversation(
@@ -1307,9 +1280,9 @@ class MainWindow(QMainWindow):
             if conversation.character_id
             else None
         )
-        role_memory_enabled = self._settings.get(
-            "role_memory_enabled", "true"
-        ).lower() in {"1", "true", "yes", "on"}
+        role_memory_enabled = self._settings.get_bool(
+            "role_memory_enabled", True
+        )
         if character is not None and role_memory_enabled:
             completed = [
                 turn
@@ -1427,9 +1400,7 @@ class MainWindow(QMainWindow):
         return max(0.0, min(value, 2.0))
 
     def _role_state(self, conversation) -> dict:
-        if self._settings.get(
-            "role_memory_enabled", "true"
-        ).lower() not in {"1", "true", "yes", "on"}:
+        if not self._settings.get_bool("role_memory_enabled", True):
             return {}
         try:
             state = json.loads(conversation.role_state_json or "{}")
@@ -1453,11 +1424,8 @@ class MainWindow(QMainWindow):
     def _play_notification(self, *, force: bool = False) -> bool:
         if self._notification_sound is None:
             return False
-        enabled = (
-            self._settings.get(
-                "notification_sound_enabled", "true"
-            ).lower()
-            in {"1", "true", "yes", "on"}
+        enabled = self._settings.get_bool(
+            "notification_sound_enabled", True
         )
         return self._notification_sound.play() if force or enabled else False
 

@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 from PySide6.QtCore import QObject, Signal, Slot
 
 from ..chat_service import ChatEventType, ChatStreamService
+from ..error_codes import image_error_code
 from ..gateway import Message
 from .assets import install_generated_image
 from .image_service import image_context
@@ -115,41 +116,7 @@ class ChatWorker(QObject):
 
     @staticmethod
     def _error_code(exc: Exception) -> str:
-        name = type(exc).__name__.lower()
-        message = str(exc).lower()
-        status_code = getattr(exc, "status_code", None)
-        api_error_code = str(getattr(exc, "error_code", "") or "").lower()
-        if (
-            "insufficient_quota" in api_error_code
-            or "billing" in api_error_code
-            or "quota" in message
-            or "billing" in message
-            or (
-                api_error_code == "failed_precondition"
-                and "free tier" in message
-            )
-        ):
-            return "image_quota"
-        if (
-            status_code in {401, 403}
-            or "auth" in name
-            or "401" in message
-            or "api key" in message
-        ):
-            return "image_authentication"
-        if (
-            status_code == 404
-            or "model_not_found" in api_error_code
-            or "does not exist" in message
-        ):
-            return "image_model_unavailable"
-        if "timeout" in name or "timeout" in message:
-            return "image_timeout"
-        if "connect" in name or "network" in message:
-            return "image_network"
-        if status_code == 429 or "rate" in name or "429" in message:
-            return "image_rate_limit"
-        return "image_service_error"
+        return image_error_code(exc)
 
 
 class ImageGenerationWorker(QObject):

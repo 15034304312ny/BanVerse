@@ -471,6 +471,20 @@ class ChatRepository:
         )
         return [Turn(**dict(row)) for row in rows]
 
+    def get_turn(self, conversation_id: str, turn_id: str) -> Turn | None:
+        """按会话与轮次 ID 单条查询，避免全表装载后再过滤。"""
+
+        row = self._db.execute(
+            """SELECT id, conversation_id, user_content, assistant_content,
+                      reasoning_content, model, status, error_code, created_at,
+                      origin, user_image_path, user_image_description,
+                      assistant_image_path, user_sticker,
+                      assistant_segments_json
+               FROM turns WHERE conversation_id = ? AND id = ?""",
+            (conversation_id, turn_id),
+        ).fetchone()
+        return Turn(**dict(row)) if row else None
+
     def completed_history(
         self, conversation_id: str, *, max_turns: int | None = None
     ) -> list[Message]:
@@ -636,6 +650,12 @@ class SettingsRepository:
     def get(self, key: str, default: str = "") -> str:
         row = self._db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
+
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        """读取布尔设置；持久值按常见布尔文本解析。"""
+
+        value = self.get(key, "true" if default else "false").lower()
+        return value in {"1", "true", "yes", "on"}
 
     def contains(self, key: str, *, connection=None) -> bool:
         db = connection or self._db

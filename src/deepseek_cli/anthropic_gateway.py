@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from .branding import USER_AGENT
 from .gateway import Message, StreamDelta
 from .model_catalog import MODEL_CHAT, resolve_provider_model
+from .sse import iter_sse_data, parse_http_error_body, parse_stream_delta
 
 DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
@@ -102,16 +103,8 @@ class DeepSeekHttpGateway:
         )
         try:
             with self._opener(request, timeout=self._timeout) as response:
-                for raw_line in response:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        if data == "[DONE]":
-                            break
-                        continue
-                    delta = self._parse_delta(data)
+                for data in iter_sse_data(response):
+                    delta = parse_stream_delta(data)
                     if delta is None:
                         continue
                     reasoning = delta.get("reasoning_content")
@@ -124,37 +117,10 @@ class DeepSeekHttpGateway:
             raise self._http_error(exc) from exc
 
     @staticmethod
-    def _parse_delta(data: str) -> dict[str, Any] | None:
-        try:
-            payload = json.loads(data)
-        except (TypeError, ValueError):
-            return None
-        if not isinstance(payload, dict):
-            return None
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices:
-            return None
-        choice = choices[0]
-        if not isinstance(choice, dict):
-            return None
-        delta = choice.get("delta")
-        return delta if isinstance(delta, dict) else None
-
-    @staticmethod
     def _http_error(exc: HTTPError) -> DeepSeekHttpError:
-        message = f"DeepSeek HTTP {exc.code}"
-        error_code = ""
-        try:
-            raw = exc.read(64 * 1024).decode("utf-8", errors="replace")
-            payload = json.loads(raw)
-            error = payload.get("error") if isinstance(payload, dict) else None
-            if isinstance(error, dict):
-                detail = str(error.get("message", "") or "").strip()
-                error_code = str(error.get("code", "") or "").strip()
-                if detail:
-                    message = detail[:500]
-        except (AttributeError, OSError, TypeError, ValueError):
-            pass
+        message, error_code = parse_http_error_body(
+            exc, default_message=f"DeepSeek HTTP {exc.code}"
+        )
         return DeepSeekHttpError(
             message,
             status_code=exc.code,

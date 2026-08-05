@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 from .branding import USER_AGENT
 from .gateway import Message, StreamDelta
+from .sse import iter_sse_data, parse_http_error_body, parse_stream_delta
 
 DEFAULT_GRSAI_API_BASE_URL = "https://grsai.dakka.com.cn/v1"
 DEFAULT_GRSAI_TEXT_MODEL = "gemini-3.1-flash-lite"
@@ -118,14 +119,8 @@ class GrsAiGateway:
         )
         try:
             with self._opener(request, timeout=self._timeout) as response:
-                for raw_line in response:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    delta = self._parse_delta(data)
+                for data in iter_sse_data(response):
+                    delta = parse_stream_delta(data)
                     if delta is None:
                         continue
                     reasoning = delta.get("reasoning_content")
@@ -140,41 +135,10 @@ class GrsAiGateway:
             raise GrsAiHttpError(f"GRS AI 网络错误: {exc.reason}") from exc
 
     @staticmethod
-    def _parse_delta(data: str) -> dict[str, Any] | None:
-        if not data:
-            return None
-        try:
-            payload = json.loads(data)
-        except (TypeError, ValueError):
-            return None
-        choices = payload.get("choices") if isinstance(payload, dict) else None
-        if not isinstance(choices, list) or not choices:
-            return None
-        choice = choices[0]
-        if not isinstance(choice, dict):
-            return None
-        delta = choice.get("delta")
-        return delta if isinstance(delta, dict) else None
-
-    @staticmethod
     def _http_error(exc: HTTPError) -> GrsAiHttpError:
-        detail = exc.read(64 * 1024).decode("utf-8", errors="replace")
-        message = f"GRS AI HTTP {exc.code}"
-        error_code = ""
-        try:
-            payload = json.loads(detail)
-            error = payload.get("error") if isinstance(payload, dict) else None
-            if isinstance(error, dict):
-                message = str(error.get("message") or message).strip()[:500]
-                error_code = str(
-                    error.get("code") or error.get("type") or ""
-                ).strip()
-            elif isinstance(payload, dict):
-                message = str(payload.get("message") or message).strip()[:500]
-                error_code = str(payload.get("code") or "").strip()
-        except (TypeError, ValueError):
-            if detail.strip():
-                message = detail.strip()[:500]
+        message, error_code = parse_http_error_body(
+            exc, default_message=f"GRS AI HTTP {exc.code}"
+        )
         return GrsAiHttpError(
             message,
             status_code=exc.code,

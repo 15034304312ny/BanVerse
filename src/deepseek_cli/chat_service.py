@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from threading import Event
 
+from .error_codes import text_error_code
 from .gateway import ChatGateway, Message
 from .model_catalog import resolve_model
 
@@ -106,46 +107,10 @@ class ChatStreamService:
                 str(exc)[:500],
             )
             yield ChatEvent(
-                ChatEventType.ERROR, error_code=self._classify_error(exc)
+                ChatEventType.ERROR, error_code=text_error_code(exc)
             )
         finally:
             close = getattr(stream, "close", None)
             if callable(close):
                 with suppress(Exception):
                     close()
-
-    @staticmethod
-    def _classify_error(exc: Exception) -> str:
-        name = type(exc).__name__.lower()
-        message = str(exc).lower()
-        status_code = getattr(exc, "status_code", None)
-        api_error_code = str(
-            getattr(exc, "error_code", "") or ""
-        ).lower()
-        if (
-            status_code in {401, 403}
-            or "auth" in name
-            or "auth" in api_error_code
-            or "401" in message
-            or "api key" in message
-        ):
-            return "authentication"
-        if "timeout" in name or "timeout" in message:
-            return "timeout"
-        if (
-            "connect" in name
-            or "urlerror" in name
-            or "network" in message
-        ):
-            return "network"
-        if status_code == 429 or "rate" in name or "429" in message:
-            return "rate_limit"
-        if status_code == 404:
-            return "text_endpoint_invalid"
-        if status_code == 400 and (
-            "model" in api_error_code or "model" in message
-        ):
-            return "text_model_unavailable"
-        if status_code == 400:
-            return "text_bad_request"
-        return "service_error"
