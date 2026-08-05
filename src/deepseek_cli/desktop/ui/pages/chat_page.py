@@ -121,7 +121,11 @@ class ChatPage(QWidget):
         layout.addWidget(header)
 
         self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
+        # widgetResizable 的自动 resize 在 Android 上偶尔不把内容 widget 收缩
+        # 到真实内容高度，导致最下方残留可滚动的"幽灵空白"：滚动条被撑大，
+        # 钉底后视口里只有空白，最新气泡被顶到视口之外。改由 _relayout_messages
+        # 手动精确控制内容 widget 尺寸。
+        self.scroll.setWidgetResizable(False)
         self.scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
@@ -304,6 +308,7 @@ class ChatPage(QWidget):
             self._stream_bubble.hide()
             self._stream_bubble.deleteLater()
             self._stream_bubble = None
+            self._relayout_messages()
 
     def show_typing_indicator(self) -> None:
         """在两条分段消息之间显示轻量输入状态。"""
@@ -374,7 +379,7 @@ class ChatPage(QWidget):
 
     def eventFilter(self, watched, event) -> bool:
         if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
-            self._update_bubble_widths()
+            self._relayout_messages()
         return super().eventFilter(watched, event)
 
     def _add_bubble(self, role: str, text: str, **kwargs) -> MessageBubble:
@@ -394,21 +399,43 @@ class ChatPage(QWidget):
         if bubble is not None:
             bubble.set_speech_state(state)
 
-    def _update_bubble_widths(self) -> None:
-        """按视口宽度更新气泡宽度；仅在宽度真正变化时执行。
+    def _relayout_messages(self) -> None:
+        """确定性刷新内容 widget 尺寸与气泡宽度。
 
-        Android 上软键盘/insets 变化会触发大量 viewport Resize，宽度不变
-        时全量重排会改变文本换行与气泡高度、让滚动条不跟随而加剧顶漂。
+        - 宽度跟随视口；仅宽度真正变化时重排气泡，避免 Android 软键盘/
+          insets 变化触发 resize 风暴导致换行抖动。
+        - 高度精确等于真实内容高度（至少视口高度）。内容溢出时不再残留
+          "幽灵空白"，滚动条 maximum 即真实内容底部，钉底就能看到最新
+          气泡；内容不足一屏时消息靠上、下方留白不再可滚动。
         """
 
-        viewport_width = self.scroll.viewport().width()
-        if viewport_width == getattr(self, "_last_viewport_width", -1):
-            return
-        self._last_viewport_width = viewport_width
-        for index in range(self.messages_layout.count() - 1):
-            widget = self.messages_layout.itemAt(index).widget()
-            if isinstance(widget, MessageBubble):
-                widget.set_chat_width(viewport_width)
+        viewport = self.scroll.viewport()
+        width = viewport.width()
+        height = viewport.height()
+        if width != self.messages.width():
+            self.messages.setFixedWidth(width)
+        if width != getattr(self, "_last_viewport_width", -1):
+            self._last_viewport_width = width
+            for index in range(self.messages_layout.count()):
+                widget = self.messages_layout.itemAt(index).widget()
+                if isinstance(widget, MessageBubble):
+                    widget.set_chat_width(width)
+        target = max(self.messages_layout.sizeHint().height(), height)
+        if self.messages.height() != target:
+            self.messages.setFixedHeight(target)
+
+    def _content_bottom(self) -> int:
+        """真实内容底部对应的滚动位置，不依赖可能滞后的 widget 高度。
+
+        与 bar.maximum() 不同，这里直接按布局 sizeHint 计算，widget 高度
+        尚未被布局事件应用到滚动条 range 时结果仍然正确。
+        """
+
+        return max(
+            0,
+            self.messages_layout.sizeHint().height()
+            - self.scroll.viewport().height(),
+        )
 
     def _clear_messages(self) -> None:
         self.scroll.verticalScrollBar().setValue(0)
@@ -425,6 +452,7 @@ class ChatPage(QWidget):
                 widget.deleteLater()
         self.messages.updateGeometry()
         self.messages.update()
+        self._relayout_messages()
 
     def _model_selected(self, index: int) -> None:
         model = self.model_combo.itemData(index)
@@ -446,18 +474,20 @@ class ChatPage(QWidget):
                 and scroller.state() != QScroller.State.Inactive
             ):
                 scroller.stop()
-        # 布局激活前 maximum() 可能过时（QTBUG-35250）；若当前贴底则记
-        # 标志，等 rangeChanged 在布局激活后补滚到真实最大。
+        self._relayout_messages()
+        # 直接按真实内容底部滚动，不依赖可能滞后的 bar.maximum()
+        # （QTBUG-35250：布局激活前 maximum 过时，会把最新气泡顶到
+        # 视口之外）；同时记录贴底意图，等 rangeChanged 补滚兜底。
         if bar.maximum() - bar.value() <= 160:
             self._pin_to_bottom = True
-        bar.setValue(bar.maximum())
+        bar.setValue(self._content_bottom())
 
     def _on_scroll_range_changed(self, _minimum: int, maximum: int) -> None:
-        """布局激活、滚动条 range 更新后，若仍钉在底部则补滚到真实最大。"""
+        """布局激活、滚动条 range 更新后，若仍钉在底部则补滚到真实内容底部。"""
 
         if not self._pin_to_bottom:
             return
         self._pin_to_bottom = False
         bar = self.scroll.verticalScrollBar()
         if bar.maximum() - bar.value() <= 160:
-            bar.setValue(maximum)
+            bar.setValue(self._content_bottom())
