@@ -1,0 +1,27 @@
+# 统一行尾策略：存储用 LF，避免 CRLF 转换在 diff 与打包时产生噪音。
+# 特别地，packaging/android/*.sh 在 WSL/bash 中执行，必须保持 LF；
+# Windows 脚本（.ps1/.bat）检出时使用 CRLF。
+* text=auto
+
+*.py   text eol=lf
+*.pyi  text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.spec text eol=lf
+*.template text eol=lf
+*.gradle text eol=lf
+*.cmake text eol=lf
+*.sh   text eol=lf
+
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+
+*.png binary
+*.ico binary
+*.wav binary
+*.apk binary
+*.exe binary

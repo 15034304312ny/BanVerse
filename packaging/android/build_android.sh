@@ -41,6 +41,11 @@ if ! command -v curl >/dev/null 2>&1; then
     echo "找不到 curl，无法下载 Qt 官方 Android wheel。" >&2
     exit 2
 fi
+if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/../check_version_consistency.py" >/dev/null 2>&1; then
+    echo "版本号不一致：pyproject.toml、branding.py 与 build_android.sh 中的版本号必须保持一致。" >&2
+    "${PYTHON_BIN}" "${SCRIPT_DIR}/../check_version_consistency.py" || true
+    exit 2
+fi
 if [[ -n "${ANDROID_BUILD_PROXY_HOST:-}" \
     && -n "${ANDROID_BUILD_PROXY_PORT:-}" ]]; then
     export JAVA_TOOL_OPTIONS="\
