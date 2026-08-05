@@ -21,11 +21,15 @@ analysis = Analysis(
     hiddenimports=[
         "edge_tts",
         "websocket",
+        "aiohttp",
+        "certifi",
         "PySide6.QtMultimedia",
         "PySide6.QtTextToSpeech",
         "keyring.backends.Windows",
         "win32ctypes",
+        "win32ctypes.pywin32",
         *collect_submodules("edge_tts"),
+        *collect_submodules("win32ctypes"),
     ],
     hookspath=[],
     hooksconfig={},
@@ -45,7 +49,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX 压缩会显著增大 Windows Defender/EDR 误报概率并拖慢 onefile 首启
+    # （需解压到临时目录）；关闭它以换取稳定的首次启动体验。
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
 )

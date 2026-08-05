@@ -83,6 +83,14 @@ def configure_startup_logging(data_root: Path) -> Path:
     return log_path
 
 
+def _smoke_test_enabled() -> bool:
+    """是否处于无人值守冒烟模式（供 CI 与非交互验证）。"""
+
+    return os.environ.get("BANVERSE_SMOKE_TEST") == "1" or os.environ.get(
+        "DEEPSEEK_CHAT_SMOKE_TEST"
+    ) == "1"
+
+
 def _initialize_optional_audio(
     application: QApplication,
     window,
@@ -210,6 +218,11 @@ def main() -> int:
             QTimer.singleShot(500, application.quit)
         return application.exec()
     except Exception as error:
+        if _smoke_test_enabled():
+            # 无人值守冒烟：不弹模态 QMessageBox（会永久挂起等待点击），
+            # 只记录崩溃日志并以非零退出码返回。
+            LOGGER.exception("Smoke test startup failed")
+            return 1
         return _show_startup_failure(application, error, log_path)
     finally:
         if database is not None:
