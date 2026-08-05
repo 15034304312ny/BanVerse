@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
 )
 
 from ...data.repositories import ChatRepository, Conversation
-from ...platform import is_android_platform
 from ..mobile import enable_touch_scrolling
 from ..widgets.avatar_widget import AvatarWidget
 

@@ -1,0 +1,25 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev,desktop]"
+
+      - name: Ruff lint
+        run: python -m ruff check src tests packaging
+
+      - name: Version consistency
+        run: python packaging/check_version_consistency.py
+
+      - name: Test
+        run: python -m pytest

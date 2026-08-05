@@ -24,20 +24,20 @@ from ..tts import (
     extract_speech_segments,
     resolve_effective_profile,
 )
-from .workers import (
-    IndexTts2SynthesisWorker,
-    SiliconFlowTtsSynthesisWorker,
-    TtsSynthesisWorker,
-    XfyunSuperTtsSynthesisWorker,
-)
 from .index_tts2 import (
     DEFAULT_INDEXTTS2_BASE_URL,
     DEFAULT_INDEXTTS2_PRESET,
     normalize_index_tts2_base_url,
 )
 from .platform import is_android_platform
+from .workers import (
+    IndexTts2SynthesisWorker,
+    SiliconFlowTtsSynthesisWorker,
+    TtsSynthesisWorker,
+    XfyunSuperTtsSynthesisWorker,
+)
 from .xfyun_catalog import (
-    XFYUN_TTS_VOICE_OPTIONS,
+    XFYUN_TTS_VOICE_OPTIONS,  # noqa: F401 - re-export 供设置页导入
     automatic_voice,
     deserialize_available_voices,
 )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QUrl, Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -14,8 +14,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...stickers import sticker_by_id
 from ...platform import is_android_platform
+from ...stickers import sticker_by_id
 
 
 class MessageBubble(QWidget):

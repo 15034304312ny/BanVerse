@@ -27,15 +27,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...data.repositories import SettingsRepository
-from ...platform import is_android_platform
-from ...security.credentials import CredentialStore
 from ....branding import PRODUCT_NAME, PRODUCT_VERSION
 from ....grsai_gateway import (
     DEFAULT_GRSAI_API_BASE_URL,
     DEFAULT_GRSAI_TEXT_MODEL,
     normalize_grsai_base_url,
 )
+from ....model_catalog import MODEL_CHAT, text_provider_models
+from ...data.repositories import SettingsRepository
 from ...image_service import (
     DEFAULT_GRSAI_IMAGE_MODEL,
     DEFAULT_GRSAI_IMAGE_SIZE,
@@ -43,19 +42,6 @@ from ...image_service import (
     DEFAULT_SILICONFLOW_IMAGE_MODEL,
     DEFAULT_SILICONFLOW_IMAGE_SIZE,
     DEFAULT_SILICONFLOW_VISION_MODEL,
-)
-from ...model_discovery import (
-    ProviderModel,
-    ProviderModelCatalog,
-    deserialize_models,
-    models_for_capability,
-    serialize_models,
-)
-from ...tts import (
-    DEFAULT_SILICONFLOW_TTS_MODEL,
-    DEFAULT_XFYUN_TTS_VOICE,
-    SILICONFLOW_VOICE_OPTIONS,
-    XFYUN_TTS_VOICE_OPTIONS,
 )
 from ...index_tts2 import (
     DEFAULT_INDEXTTS2_BASE_URL,
@@ -67,6 +53,21 @@ from ...index_tts2 import (
     normalize_index_tts2_base_url,
     serialize_index_tts2_presets,
 )
+from ...model_discovery import (
+    ProviderModel,
+    ProviderModelCatalog,
+    deserialize_models,
+    models_for_capability,
+    serialize_models,
+)
+from ...platform import is_android_platform
+from ...security.credentials import CredentialStore
+from ...tts import (
+    DEFAULT_SILICONFLOW_TTS_MODEL,
+    DEFAULT_XFYUN_TTS_VOICE,
+    SILICONFLOW_VOICE_OPTIONS,
+    XFYUN_TTS_VOICE_OPTIONS,
+)
 from ...workers import (
     IndexTts2CatalogWorker,
     XfyunSuperTtsSynthesisWorker,
@@ -77,7 +78,6 @@ from ...xfyun_catalog import (
     deserialize_available_voices,
     serialize_available_voices,
 )
-from ....model_catalog import MODEL_CHAT, text_provider_models
 from ..mobile import (
     configure_mobile_form,
     enable_touch_scrolling,
@@ -1094,11 +1094,11 @@ class SettingsPage(QWidget):
         xfyun_plain_note.setProperty("muted", True)
         xfyun_form.addRow("合成方式", xfyun_plain_note)
         self.xfyun_tts_status = QLabel(
-            (
+
                 f"已缓存 {len(self._xfyun_available_voices)} 个当前账号可用音色。"
                 if self._xfyun_available_voices
                 else "尚未检测当前账号的音色权限。"
-            )
+
         )
         self.xfyun_tts_status.setWordWrap(True)
         self.xfyun_tts_status.setProperty("muted", True)

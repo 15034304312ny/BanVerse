@@ -6,7 +6,6 @@ import sys
 import zipfile
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ANDROID_DIR = PROJECT_ROOT / "packaging" / "android"
 P4A_COMMIT = "0382d27de2f7315ed98e74884bafb30365decdee"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from io import StringIO
 
-from deepseek_cli.app import ChatApplication, MODEL_CHAT, MODEL_REASONER
+from deepseek_cli.app import MODEL_CHAT, MODEL_REASONER, ChatApplication
 from deepseek_cli.gateway import Message, StreamDelta
 
 

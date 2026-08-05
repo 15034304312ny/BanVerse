@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from deepseek_cli.desktop.data.database import Database
 from deepseek_cli.character_cards import empty_card
+from deepseek_cli.desktop.data.database import Database
 from deepseek_cli.desktop.data.repositories import (
     CharacterRepository,
     ChatRepository,

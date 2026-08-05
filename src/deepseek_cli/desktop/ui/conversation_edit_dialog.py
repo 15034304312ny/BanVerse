@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
 from ..assets import AvatarError, import_avatar
 from ..data.repositories import Character, Conversation
 from ..platform import is_android_platform
-from .mobile import configure_mobile_form
 from .file_dialogs import open_mobile_file_dialog
+from .mobile import configure_mobile_form
 from .widgets.avatar_widget import AvatarWidget
 
 

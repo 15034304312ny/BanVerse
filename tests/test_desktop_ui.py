@@ -3,8 +3,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
-    QFormLayout,
     QDialog,
+    QFormLayout,
     QLabel,
     QPushButton,
     QScrollArea,
@@ -19,14 +19,14 @@ from deepseek_cli.desktop.data.repositories import (
     SettingsRepository,
 )
 from deepseek_cli.desktop.model_discovery import ProviderModel, serialize_models
+from deepseek_cli.desktop.stickers import STICKERS
+from deepseek_cli.desktop.ui.character_editor_dialog import (
+    CharacterEditorDialog,
+)
 from deepseek_cli.desktop.ui.pages.characters_page import CharacterRow
 from deepseek_cli.desktop.ui.pages.chat_page import ChatPage
 from deepseek_cli.desktop.ui.pages.conversations_page import ConversationRow
 from deepseek_cli.desktop.ui.pages.settings_page import SettingsPage
-from deepseek_cli.desktop.ui.character_editor_dialog import (
-    CharacterEditorDialog,
-)
-from deepseek_cli.desktop.stickers import STICKERS
 from deepseek_cli.desktop.ui.widgets.chat_composer import ChatComposer
 from deepseek_cli.desktop.ui.widgets.message_bubble import MessageBubble
 from deepseek_cli.desktop.ui.widgets.sticker_picker import StickerPickerDialog
@@ -502,7 +502,7 @@ def test_settings_model_dropdowns_filter_cached_catalog_by_capability(
                 ),
                 ProviderModel("siliconflow", "tts-model", ("tts",)),
                 ProviderModel(
-                    "siliconflow", "embedding-model", tuple()
+                    "siliconflow", "embedding-model", ()
                 ),
             )
         ),
@@ -510,9 +510,10 @@ def test_settings_model_dropdowns_filter_cached_catalog_by_capability(
     page = SettingsPage(settings, Credentials())
     qtbot.addWidget(page)
 
-    combo_values = lambda combo: {
-        combo.itemData(index) for index in range(combo.count())
-    }
+    def combo_values(combo):
+        return {
+            combo.itemData(index) for index in range(combo.count())
+        }
     assert {"chat-only", "vision-chat"} <= combo_values(page.grsai_text_model)
     assert "image-only" not in combo_values(page.grsai_text_model)
     assert "vision-chat" in combo_values(page.grsai_vision_model)

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import copy
+import hashlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Callable
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QImageReader

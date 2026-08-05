@@ -7,8 +7,8 @@ from urllib.error import HTTPError
 import pytest
 
 from deepseek_cli.anthropic_gateway import (
-    DEFAULT_MAX_TOKENS,
     DEEPSEEK_CHAT_URL,
+    DEFAULT_MAX_TOKENS,
     DeepSeekHttpError,
     DeepSeekHttpGateway,
 )
@@ -140,8 +140,8 @@ def test_gateway_applies_claude_and_unknown_model_mapping():
     ):
         captured = {}
 
-        def opener(request, *, timeout):
-            captured["payload"] = json.loads(request.data)
+        def opener(request, *, timeout, _captured=captured):
+            _captured["payload"] = json.loads(request.data)
             return FakeResponse([sse("[DONE]")])
 
         gateway = DeepSeekHttpGateway("key", opener=opener)

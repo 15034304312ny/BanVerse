@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from pathlib import Path
 from importlib import resources
+from pathlib import Path
 
 from PySide6.QtGui import QImage
 
+from deepseek_cli.character_cards import dump_card
 from deepseek_cli.desktop.builtin_characters import (
     BUILTIN_CHARACTER_IDS,
     BuiltinCharacterManager,
@@ -16,7 +17,6 @@ from deepseek_cli.desktop.builtin_characters import (
     seed_setting_key,
     stable_character_id,
 )
-from deepseek_cli.character_cards import dump_card
 from deepseek_cli.desktop.data.database import Database
 from deepseek_cli.desktop.data.repositories import (
     CharacterRepository,

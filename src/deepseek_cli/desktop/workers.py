@@ -12,6 +12,7 @@ import os
 import re
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
@@ -181,10 +182,8 @@ class ImageGenerationWorker(QObject):
                 image_bytes, app_data_root=self._app_data_root
             )
             if self._cancel_event.is_set():
-                try:
+                with suppress(OSError):
                     Path(path).unlink(missing_ok=True)
-                except OSError:
-                    pass
                 self.cancelled.emit()
                 return
             self.completed.emit(path)
@@ -272,10 +271,8 @@ class TtsSynthesisWorker(QObject):
 
     def _cleanup(self) -> None:
         for path in (self._output, self._output.with_suffix(".part")):
-            try:
+            with suppress(OSError):
                 path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     @staticmethod
     def _error_code(exc: Exception) -> str:
@@ -399,10 +396,8 @@ class SiliconFlowTtsSynthesisWorker(QObject):
 
     def _cleanup(self) -> None:
         for path in (self._output, self._output.with_suffix(".part")):
-            try:
+            with suppress(OSError):
                 path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     @staticmethod
     def _error_code(exc: Exception) -> str:
@@ -579,10 +574,8 @@ class IndexTts2SynthesisWorker(QObject):
 
     def _cleanup(self) -> None:
         for path in (self._output, self._output.with_suffix(".part")):
-            try:
+            with suppress(OSError):
                 path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     @staticmethod
     def _error_code(exc: Exception) -> str:
@@ -767,10 +760,8 @@ class XfyunSuperTtsSynthesisWorker(QObject):
                 if int(header.get("status", 0) or 0) == 2:
                     final_received_at = final_received_at or time.monotonic()
         finally:
-            try:
+            with suppress(Exception):
                 connection.close()
-            except Exception:
-                pass
         if self._cancel_event.is_set():
             self.cancelled.emit(self._request_id)
             return
@@ -869,10 +860,8 @@ class XfyunSuperTtsSynthesisWorker(QObject):
 
     def _cleanup(self) -> None:
         for path in (self._output, self._output.with_suffix(".part")):
-            try:
+            with suppress(OSError):
                 path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     @staticmethod
     def _sanitize_text(text: str) -> str:

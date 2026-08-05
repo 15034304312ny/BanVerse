@@ -6,6 +6,7 @@ import faulthandler
 import os
 import sys
 import traceback
+from contextlib import suppress
 from pathlib import Path
 
 
@@ -47,10 +48,8 @@ def _configure_tls_ca_bundle() -> str:
                 partial.replace(merged)
                 selected = merged
             except OSError:
-                try:
+                with suppress(OSError):
                     partial.unlink(missing_ok=True)
-                except OSError:
-                    pass
     if selected is not None:
         os.environ["SSL_CERT_FILE"] = str(selected)
         try:

@@ -1,22 +1,22 @@
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtGui import QImage
 
+import deepseek_cli.desktop.ui.main_window as main_window_module
 from deepseek_cli.character_cards import empty_card
+from deepseek_cli.desktop.ai_features import (
+    ReplySegment,
+    deserialize_reply_segments,
+)
 from deepseek_cli.desktop.data.database import Database
 from deepseek_cli.desktop.data.repositories import (
     CharacterRepository,
     ChatRepository,
     SettingsRepository,
 )
-from deepseek_cli.desktop.ai_features import (
-    ReplySegment,
-    deserialize_reply_segments,
-)
 from deepseek_cli.desktop.ui.main_window import MainWindow
-import deepseek_cli.desktop.ui.main_window as main_window_module
 from deepseek_cli.gateway import Message, StreamDelta
 
 
@@ -156,7 +156,7 @@ def test_main_window_uses_single_column_android_navigation(
     chats = ChatRepository(database)
     characters = CharacterRepository(database)
     settings = SettingsRepository(database)
-    conversation = chats.create_conversation(
+    chats.create_conversation(
         title="移动端会话", opening_message="移动端历史消息"
     )
 

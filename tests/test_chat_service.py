@@ -94,41 +94,6 @@ def test_service_forwards_roleplay_options():
     assert captured["temperature"] == 1.3
 
 
-def test_service_forwards_roleplay_options():
-    captured = {}
-
-    class ConfigurableGateway:
-        def stream_chat(
-            self,
-            model,
-            messages,
-            *,
-            system_prompt="",
-            temperature=None,
-        ):
-            captured.update(
-                model=model,
-                messages=list(messages),
-                system_prompt=system_prompt,
-                temperature=temperature,
-            )
-            yield StreamDelta(content="角色回复")
-
-    events = list(
-        ChatStreamService(ConfigurableGateway).stream(
-            MODEL_CHAT,
-            [],
-            "你好",
-            system_prompt="角色设定",
-            temperature=1.3,
-        )
-    )
-
-    assert events[-1].type is ChatEventType.COMPLETED
-    assert captured["system_prompt"] == "角色设定"
-    assert captured["temperature"] == 1.3
-
-
 def test_service_honors_cancellation():
     cancel = Event()
 
@@ -182,8 +147,8 @@ def test_service_classifies_provider_http_errors_without_exposing_details():
     )
     for error, expected_code in cases:
         class BrokenGateway:
-            def stream_chat(self, _model, _messages):
-                raise error
+            def stream_chat(self, _model, _messages, _error=error):
+                raise _error
                 yield
 
         events = list(

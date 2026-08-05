@@ -1,25 +1,25 @@
 import json
 from urllib.parse import parse_qs, urlsplit
 
+import deepseek_cli.desktop.workers as workers_module
 from deepseek_cli.character_cards import empty_card
-from deepseek_cli.desktop.tts import (
-    XFYUN_DEFAULT_TUNING,
-    SpeechController,
-)
 from deepseek_cli.desktop.index_tts2 import (
     DEFAULT_INDEXTTS2_BASE_URL,
     normalize_index_tts2_base_url,
 )
-from deepseek_cli.desktop.xfyun_catalog import (
-    available_voice_options,
-    serialize_available_voices,
+from deepseek_cli.desktop.tts import (
+    XFYUN_DEFAULT_TUNING,
+    SpeechController,
 )
 from deepseek_cli.desktop.workers import (
     IndexTts2SynthesisWorker,
     SiliconFlowTtsSynthesisWorker,
     XfyunSuperTtsSynthesisWorker,
 )
-import deepseek_cli.desktop.workers as workers_module
+from deepseek_cli.desktop.xfyun_catalog import (
+    available_voice_options,
+    serialize_available_voices,
+)
 from deepseek_cli.tts import (
     TtsProfile,
     detect_emotion,

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from array import array
-from importlib import resources
 import sys
 import wave
+from array import array
+from importlib import resources
 
 
 def test_bundled_notification_sound_is_short_bright_pcm_wav():

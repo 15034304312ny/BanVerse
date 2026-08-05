@@ -11,6 +11,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
+import deepseek_cli.desktop.image_service as image_service_module
 from deepseek_cli.desktop.assets import (
     AvatarError,
     import_chat_image,
@@ -24,7 +25,6 @@ from deepseek_cli.desktop.image_service import (
     SiliconFlowImageService,
     image_context,
 )
-import deepseek_cli.desktop.image_service as image_service_module
 from deepseek_cli.desktop.workers import ChatWorker
 
 

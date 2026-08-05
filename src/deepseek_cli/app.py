@@ -8,7 +8,11 @@ from typing import TextIO
 
 from .chat_service import ChatEventType, ChatStreamService
 from .gateway import ChatGateway, Message
-from .model_catalog import MODEL_CHAT, MODEL_REASONER, resolve_model
+from .model_catalog import (
+    MODEL_CHAT,
+    MODEL_REASONER,  # noqa: F401 - re-export 供测试与第三方调用
+    resolve_model,
+)
 
 _HELP = """可用命令：
   /help             显示帮助

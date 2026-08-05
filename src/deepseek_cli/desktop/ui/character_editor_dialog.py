@@ -35,8 +35,8 @@ from ..assets import AvatarError, import_avatar
 from ..data.repositories import Character
 from ..index_tts2 import INDEXTTS2_BUILTIN_PRESETS
 from ..platform import is_android_platform
-from .mobile import configure_mobile_form, enable_touch_scrolling
 from .file_dialogs import open_mobile_file_dialog
+from .mobile import configure_mobile_form, enable_touch_scrolling
 from .widgets.avatar_widget import AvatarWidget
 
 

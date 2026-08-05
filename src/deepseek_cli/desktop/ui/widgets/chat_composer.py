@@ -14,9 +14,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .sticker_picker import StickerPickerDialog
 from ...platform import is_android_platform
 from ..file_dialogs import open_mobile_file_dialog
+from .sticker_picker import StickerPickerDialog
 
 
 class ChatComposer(QFrame):

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
-import logging
 import traceback
 from importlib import resources
 from logging.handlers import RotatingFileHandler

@@ -14,14 +14,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...data.repositories import Conversation, Turn
-from ...ai_features import deserialize_reply_segments
-from ...platform import is_android_platform
 from ....model_catalog import MODELS, ModelInfo
+from ...ai_features import deserialize_reply_segments
+from ...data.repositories import Conversation, Turn
+from ...platform import is_android_platform
 from ..mobile import enable_touch_scrolling
 from ..widgets.chat_composer import ChatComposer
 from ..widgets.message_bubble import MessageBubble
-
 
 _ERROR_MESSAGES = {
     "authentication": "API Key 无效，请前往设置检查。",

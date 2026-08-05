@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...stickers import STICKERS
 from ...platform import is_android_platform
+from ...stickers import STICKERS
 
 
 class StickerPickerDialog(QDialog):

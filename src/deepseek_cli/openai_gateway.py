@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 from .gateway import Message, StreamDelta
 
@@ -33,11 +34,11 @@ class OpenAIDeepSeekGateway:
         ]
         if system_prompt.strip():
             payload.insert(0, {"role": "system", "content": system_prompt})
-        request = dict(
-            model=model,
-            messages=payload,
-            stream=True,
-        )
+        request = {
+            "model": model,
+            "messages": payload,
+            "stream": True,
+        }
         if temperature is not None:
             request["temperature"] = max(0.0, min(float(temperature), 2.0))
         stream = self._client.chat.completions.create(**request)

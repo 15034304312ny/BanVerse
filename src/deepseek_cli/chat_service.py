@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
-import logging
 from threading import Event
 
 from .gateway import ChatGateway, Message
@@ -110,10 +111,8 @@ class ChatStreamService:
         finally:
             close = getattr(stream, "close", None)
             if callable(close):
-                try:
+                with suppress(Exception):
                     close()
-                except Exception:
-                    pass
 
     @staticmethod
     def _classify_error(exc: Exception) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import suppress
 from typing import Any
 
 from PySide6.QtCore import QSettings
@@ -185,10 +186,8 @@ class CredentialStore:
 
     def _clear(self, account: str) -> None:
         self._session_keys.pop(account, None)
-        try:
+        with suppress(Exception):
             self._backend.delete_password(SERVICE_NAME, account)
-        except Exception:
-            pass
 
     def _preserve_legacy_siliconflow_key(self, account: str) -> None:
         """Split an old shared key before one capability clears its value."""
@@ -197,9 +196,7 @@ class CredentialStore:
         if not legacy:
             return
         if not self._get(account):
-            try:
+            # _save retained the value in the session fallback on failure.
+            with suppress(RuntimeError):
                 self._save(account, legacy)
-            except RuntimeError:
-                # _save retained the value in the session fallback.
-                pass
         self._clear(SILICONFLOW_ACCOUNT_NAME)

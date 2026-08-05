@@ -12,7 +12,6 @@ from urllib.error import URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-
 DEFAULT_INDEXTTS2_BASE_URL = "http://127.0.0.1:7861"
 DEFAULT_INDEXTTS2_PRESET = "BanVerse_林小满_讯飞聆小糖"
 INDEXTTS2_BUILTIN_PRESETS = (

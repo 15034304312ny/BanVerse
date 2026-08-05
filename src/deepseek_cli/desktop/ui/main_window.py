@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QThread, QTimer, Qt
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,14 +27,14 @@ from PySide6.QtWidgets import (
 
 from ...anthropic_gateway import DeepSeekHttpGateway
 from ...branding import PRODUCT_NAME, PRODUCT_SHORT_NAME
-from ...chat_service import ChatStreamService
 from ...character_prompt import build_character_prompt
-from ...model_catalog import MODEL_CHAT, text_provider_models
+from ...chat_service import ChatStreamService
 from ...grsai_gateway import (
     DEFAULT_GRSAI_API_BASE_URL,
     DEFAULT_GRSAI_TEXT_MODEL,
     GrsAiGateway,
 )
+from ...model_catalog import MODEL_CHAT, text_provider_models
 from ...tts import TtsProfile, read_tts_profile
 from ..ai_features import (
     AUTONOMOUS_IMAGE_SYSTEM_PROMPT,
@@ -64,18 +64,18 @@ from ..data.repositories import (
     ChatRepository,
     SettingsRepository,
 )
-from ..security.credentials import CredentialStore
 from ..image_service import (
-    DEFAULT_SILICONFLOW_IMAGE_MODEL,
-    DEFAULT_SILICONFLOW_IMAGE_SIZE,
-    DEFAULT_SILICONFLOW_VISION_MODEL,
     DEFAULT_GRSAI_IMAGE_MODEL,
     DEFAULT_GRSAI_IMAGE_SIZE,
     DEFAULT_GRSAI_VISION_MODEL,
+    DEFAULT_SILICONFLOW_IMAGE_MODEL,
+    DEFAULT_SILICONFLOW_IMAGE_SIZE,
+    DEFAULT_SILICONFLOW_VISION_MODEL,
     GrsAiImageService,
     SiliconFlowImageService,
 )
 from ..platform import is_android_platform
+from ..security.credentials import CredentialStore
 from ..stickers import sticker_by_id
 from ..theme import stylesheet
 from ..workers import ChatWorker, ImageGenerationWorker
