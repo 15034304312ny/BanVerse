@@ -37,27 +37,22 @@ from ...grsai_gateway import (
 from ...model_catalog import MODEL_CHAT, text_provider_models
 from ...tts import TtsProfile, read_tts_profile
 from ..ai_features import (
-    AUTONOMOUS_IMAGE_SYSTEM_PROMPT,
     PROACTIVE_SYSTEM_SUFFIX,
-    ROLE_MEMORY_SYSTEM_PROMPT,
-    SUMMARY_SYSTEM_PROMPT,
-    AutonomousImageDecision,
     ProactiveMessageScheduler,
     ReplyPlan,
     ReplySegment,
-    autonomous_image_request,
     classify_role_reply,
-    clean_ai_summary,
     enrich_role_image_prompt,
     explicit_image_request_prompt,
-    parse_autonomous_image_decision,
-    parse_role_postprocess,
     proactive_request,
-    role_memory_request,
     serialize_reply_segments,
-    summary_request,
 )
 from ..assets import AvatarError, import_chat_image
+from ..background import (
+    AutonomousImageRunner,
+    SummaryRunner,
+    launch_worker,
+)
 from ..builtin_characters import BuiltinCharacterManager
 from ..data.repositories import (
     CharacterRepository,
@@ -78,7 +73,7 @@ from ..platform import is_android_platform
 from ..security.credentials import CredentialStore
 from ..stickers import sticker_by_id
 from ..theme import stylesheet
-from ..workers import ChatWorker, ImageGenerationWorker
+from ..workers import ChatWorker
 from .conversation_edit_dialog import ConversationEditDialog
 from .pages.characters_page import CharactersPage
 from .pages.chat_page import ChatPage
@@ -88,23 +83,6 @@ from .pages.settings_page import SettingsPage
 if TYPE_CHECKING:
     from ..notification_sound import NotificationSound
     from ..tts import SpeechController
-
-
-@dataclass(frozen=True, slots=True)
-class _AutonomousImageJob:
-    conversation_id: str
-    turn_id: str
-    decision_request: str = ""
-    prompt: str = ""
-    segment_index: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _SummaryJob:
-    conversation_id: str
-    request_text: str
-    system_prompt: str
-    updates_role_state: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,20 +135,13 @@ class MainWindow(QMainWindow):
         self._worker: ChatWorker | None = None
         self._request_conversation_id: str | None = None
         self._request_kind = "user"
-        self._summary_queue: deque[_SummaryJob] = deque()
-        self._summary_thread: QThread | None = None
-        self._summary_worker: ChatWorker | None = None
-        self._summary_job: _SummaryJob | None = None
-        self._image_queue: deque[_AutonomousImageJob] = deque()
-        self._image_thread: QThread | None = None
-        self._image_worker: ChatWorker | ImageGenerationWorker | None = None
-        self._image_job: _AutonomousImageJob | None = None
-        self._image_decision = AutonomousImageDecision()
         # 流式期间的累积正文与推理；正文仅供测试观测（业务完成事件使用
         # 信号参数），推理则用于回填思考过程。
         self._answer = ""
         self._reasoning = ""
         self._proactive = ProactiveMessageScheduler(settings, self)
+        self._summary_runner: SummaryRunner | None = None
+        self._image_runner: AutonomousImageRunner | None = None
         self._mobile = is_android_platform()
         self._mobile_body: QStackedWidget | None = None
 
@@ -314,8 +285,47 @@ class MainWindow(QMainWindow):
             self._new_conversation()
         else:
             self._show_settings()
+        self._summary_runner = SummaryRunner(
+            chats=self._chats,
+            characters=self._characters,
+            settings=self._settings,
+            create_text_service=self._create_text_service,
+            text_api_key=self._text_api_key,
+            refresh=lambda: self.conversations.refresh(
+                select_id=self._conversation_id
+            ),
+            parent=self,
+        )
+        self._image_runner = AutonomousImageRunner(
+            chats=self._chats,
+            characters=self._characters,
+            settings=self._settings,
+            create_text_service=self._create_text_service,
+            create_image_service=self._create_image_service,
+            text_api_key=self._text_api_key,
+            image_api_key=self._image_api_key,
+            refresh=lambda: self.conversations.refresh(
+                select_id=self._conversation_id
+            ),
+            on_image_saved=self._on_autonomous_image_saved,
+            on_image_error=self._on_autonomous_image_error,
+            media_root=self._media_root,
+            parent=self,
+        )
         self._proactive.start()
         self._enqueue_pending_summaries()
+
+    @property
+    def _summary_thread(self) -> QThread | None:
+        """后台摘要线程（测试等待其空闲时读取）。"""
+
+        return self._summary_runner.thread if self._summary_runner else None
+
+    @property
+    def _image_thread(self) -> QThread | None:
+        """后台发图线程（测试等待其空闲时读取）。"""
+
+        return self._image_runner.thread if self._image_runner else None
 
     def set_audio_services(
         self,
@@ -577,7 +587,6 @@ class MainWindow(QMainWindow):
         temperature: float | None = None,
     ) -> None:
         service = self._create_text_service(api_key)
-        self._thread = QThread(self)
         self._worker = ChatWorker(
             service,
             model,
@@ -593,8 +602,6 @@ class MainWindow(QMainWindow):
             ),
             image_path=image_path,
         )
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
         self._worker.reasoning.connect(self._on_reasoning)
         self._worker.content.connect(self._on_content)
         self._worker.completed.connect(self._on_completed)
@@ -604,9 +611,9 @@ class MainWindow(QMainWindow):
         self._worker.image_analysis_failed.connect(
             self._on_image_analysis_failed
         )
-        self._worker.finished.connect(self._thread.quit)
-        self._thread.finished.connect(self._stream_finished)
-        self._thread.start()
+        self._thread = launch_worker(
+            self, self._worker, thread_finished=self._stream_finished
+        )
 
     def _on_image_described(self, description: str) -> None:
         if self._turn_id:
@@ -731,18 +738,6 @@ class MainWindow(QMainWindow):
         factory = self._image_service_factory or SiliconFlowImageService
         return factory(api_key, **kwargs)
 
-    def _autonomous_images_enabled(self) -> bool:
-        return self._settings.get_bool("autonomous_images_enabled", True)
-
-    def _recently_shared_image(self, conversation_id: str) -> bool:
-        completed = [
-            turn
-            for turn in self._chats.list_turns(conversation_id)
-            if turn.status == "completed"
-        ]
-        # 当前轮次加前三个已完成轮次构成冷却窗口，避免角色连续刷图。
-        return any(turn.assistant_image_path for turn in completed[-4:])
-
     def _enqueue_autonomous_image(
         self,
         conversation_id: str,
@@ -754,200 +749,36 @@ class MainWindow(QMainWindow):
         fallback_prompt: str = "",
         segment_index: int | None = None,
     ) -> None:
-        fallback = fallback_prompt.strip()[:1_500]
-        if (
-            self._shutting_down
-            or not self._autonomous_images_enabled()
-            or not self._image_api_key()
-            or (
-                not fallback
-                and (
-                    not self._text_api_key()
-                    or self._recently_shared_image(conversation_id)
-                )
-            )
-        ):
-            return
-        api_key = self._text_api_key()
-        request = ""
-        if api_key:
-            history = self._chats.completed_history(
-                conversation_id, max_turns=8
-            )
-            request = autonomous_image_request(
-                character_name,
-                character_card,
-                history,
-                answer,
-            )
-        self._image_queue = deque(
-            job
-            for job in self._image_queue
-            if job.turn_id != turn_id
-        )
-        self._image_queue.append(
-            _AutonomousImageJob(
+        if self._image_runner is not None:
+            self._image_runner.enqueue(
                 conversation_id,
                 turn_id,
-                decision_request=request,
-                prompt=fallback,
+                character_name,
+                character_card,
+                answer,
+                fallback_prompt=fallback_prompt,
                 segment_index=segment_index,
             )
-        )
-        self._start_next_autonomous_image()
 
-    def _start_next_autonomous_image(self) -> None:
-        if self._shutting_down or self._image_thread is not None:
-            return
-        while self._image_queue:
-            job = self._image_queue.popleft()
-            conversation = self._chats.get_conversation(job.conversation_id)
-            turn = self._chats.get_turn(
-                job.conversation_id, job.turn_id
-            )
-            can_decide = bool(
-                job.decision_request and self._text_api_key()
-            )
-            direct_action = bool(job.prompt) and not can_decide
-            if (
-                conversation is None
-                or turn is None
-                or turn.status != "completed"
-                or turn.assistant_image_path
-                or not self._autonomous_images_enabled()
-                or not self._image_api_key()
-                or (
-                    not job.prompt
-                    and (
-                        not can_decide
-                        or self._recently_shared_image(job.conversation_id)
-                    )
-                )
-            ):
-                continue
-            self._image_job = job
-            if direct_action:
-                self._start_autonomous_image_generation(job, job.prompt)
-                return
-            if not can_decide:
-                continue
-            self._image_decision = AutonomousImageDecision()
-            api_key = self._text_api_key()
-            service = self._create_text_service(api_key)
-            self._image_thread = QThread(self)
-            self._image_worker = ChatWorker(
-                service,
-                MODEL_CHAT,
-                (),
-                job.decision_request,
-                system_prompt=AUTONOMOUS_IMAGE_SYSTEM_PROMPT,
-            )
-            self._image_worker.moveToThread(self._image_thread)
-            self._image_thread.started.connect(self._image_worker.run)
-            self._image_worker.completed.connect(
-                self._on_autonomous_image_decision
-            )
-            self._image_worker.finished.connect(self._image_thread.quit)
-            self._image_thread.finished.connect(
-                self._autonomous_image_decision_finished
-            )
-            self._image_thread.start()
-            return
+    def _on_autonomous_image_saved(self, conversation_id: str) -> None:
+        """发图成功后的主窗口侧 UI 动作。"""
 
-    def _on_autonomous_image_decision(self, text: str) -> None:
-        self._image_decision = parse_autonomous_image_decision(text)
-
-    def _autonomous_image_decision_finished(self) -> None:
-        decision = self._image_decision
-        job = self._image_job
-        self._dispose_autonomous_image_phase()
-        selected_prompt = (
-            decision.prompt
-            if decision.send_image and decision.prompt
-            else (job.prompt if job is not None else "")
-        )
-        if (
-            not self._shutting_down
-            and job is not None
-            and selected_prompt
-            and self._chats.get_conversation(job.conversation_id) is not None
-            and self._image_api_key()
-        ):
-            self._start_autonomous_image_generation(job, selected_prompt)
-            return
-        self._image_job = None
-        self._start_next_autonomous_image()
-
-    def _start_autonomous_image_generation(
-        self, job: _AutonomousImageJob, prompt: str
-    ) -> None:
-        self._image_job = job
-        self._image_thread = QThread(self)
-        self._image_worker = ImageGenerationWorker(
-            self._create_image_service(),
-            prompt,
-            app_data_root=self._media_root,
-        )
-        self._image_worker.moveToThread(self._image_thread)
-        self._image_thread.started.connect(self._image_worker.run)
-        self._image_worker.completed.connect(
-            self._on_autonomous_image_generated
-        )
-        self._image_worker.failed.connect(
-            self._on_autonomous_image_failed
-        )
-        self._image_worker.finished.connect(self._image_thread.quit)
-        self._image_thread.finished.connect(
-            self._autonomous_image_generation_finished
-        )
-        self._image_thread.start()
-
-    def _on_autonomous_image_generated(self, image_path: str) -> None:
-        job = self._image_job
-        if self._shutting_down or job is None:
-            return
-        try:
-            self._chats.set_assistant_image_path(
-                job.turn_id,
-                image_path,
-                segment_index=job.segment_index,
-            )
-        except (KeyError, ValueError):
-            return
         self.conversations.refresh(select_id=self._conversation_id)
         if (
-            job.conversation_id == self._conversation_id
+            conversation_id == self._conversation_id
             and self._thread is None
             and self._delivery is None
         ):
-            self._open_conversation(job.conversation_id, force_reload=True)
+            self._open_conversation(conversation_id, force_reload=True)
         self._play_notification()
         if not self.isActiveWindow():
             QApplication.alert(self, 5_000)
 
-    def _on_autonomous_image_failed(self, error_code: str) -> None:
-        job = self._image_job
-        if (
-            self._shutting_down
-            or job is None
-            or job.conversation_id != self._conversation_id
-        ):
-            return
-        self.chat_page.add_image_error(error_code)
-
-    def _autonomous_image_generation_finished(self) -> None:
-        self._dispose_autonomous_image_phase()
-        self._image_job = None
-        self._image_decision = AutonomousImageDecision()
-        self._start_next_autonomous_image()
-
-    def _dispose_autonomous_image_phase(self) -> None:
-        if self._image_worker is not None:
-            self._image_worker.deleteLater()
-        if self._image_thread is not None:
-            self._image_thread.deleteLater()
-        self._image_worker = None
-        self._image_thread = None
+    def _on_autonomous_image_error(
+        self, conversation_id: str, error_code: str
+    ) -> None:
+        if conversation_id == self._conversation_id:
+            self.chat_page.add_image_error(error_code)
 
     def _on_reasoning(self, text: str) -> None:
         self._reasoning += text
@@ -960,14 +791,22 @@ class MainWindow(QMainWindow):
         if self._turn_id and conversation_id:
             plan = classify_role_reply(answer)
             visible_answer = plan.visible_text or answer.strip()
-            self._chats.complete_turn(
-                self._turn_id,
-                visible_answer,
-                self._reasoning,
-                assistant_segments_json=serialize_reply_segments(
-                    plan.segments
-                ),
-            )
+            try:
+                self._chats.complete_turn(
+                    self._turn_id,
+                    visible_answer,
+                    self._reasoning,
+                    assistant_segments_json=serialize_reply_segments(
+                        plan.segments
+                    ),
+                )
+            except KeyError:
+                # 会话在流式生成期间被删除（外键级联删除了轮次）：
+                # 放弃本轮投递，避免在排队槽中抛出未捕获异常。
+                self._pending_delivery = None
+                self._notification_pending = False
+                self._turn_id = None
+                return
             self._enqueue_summary(conversation_id, visible_answer)
             conversation = self._chats.get_conversation(conversation_id)
             character = (
@@ -1066,7 +905,6 @@ class MainWindow(QMainWindow):
                     and not self.isActiveWindow()
                 ):
                     QApplication.alert(self, 5_000)
-                self._start_next_summary()
             return
 
         self.chat_page.finish_stream()
@@ -1080,7 +918,6 @@ class MainWindow(QMainWindow):
         self._notification_pending = False
         if request_kind == "proactive" and not self.isActiveWindow():
             QApplication.alert(self, 5_000)
-        self._start_next_summary()
 
     def _start_reply_delivery(self, delivery: _ReplyDelivery) -> None:
         """把完整回复按真人聊天节奏逐条投递到消息列表。"""
@@ -1202,7 +1039,6 @@ class MainWindow(QMainWindow):
                 )
         if delivery.request_kind == "proactive" and not self.isActiveWindow():
             QApplication.alert(self, 5_000)
-        self._start_next_summary()
 
     def _send_proactive_message(self) -> None:
         """让当前角色会话在随机计时到期后主动开启话题。"""
@@ -1272,123 +1108,12 @@ class MainWindow(QMainWindow):
         )
 
     def _enqueue_summary(self, conversation_id: str, answer: str) -> None:
-        conversation = self._chats.get_conversation(conversation_id)
-        if conversation is None:
-            return
-        character = (
-            self._characters.get(conversation.character_id)
-            if conversation.character_id
-            else None
-        )
-        role_memory_enabled = self._settings.get_bool(
-            "role_memory_enabled", True
-        )
-        if character is not None and role_memory_enabled:
-            completed = [
-                turn
-                for turn in self._chats.list_turns(conversation_id)
-                if turn.status == "completed"
-            ]
-            user_text = completed[-1].user_content if completed else ""
-            job = _SummaryJob(
-                conversation_id,
-                role_memory_request(
-                    character.name,
-                    conversation.role_state_json,
-                    user_text,
-                    answer,
-                ),
-                ROLE_MEMORY_SYSTEM_PROMPT,
-                True,
-            )
-        else:
-            job = _SummaryJob(
-                conversation_id,
-                summary_request(answer),
-                SUMMARY_SYSTEM_PROMPT,
-            )
-        self._summary_queue = deque(
-            queued
-            for queued in self._summary_queue
-            if queued.conversation_id != conversation_id
-        )
-        self._summary_queue.append(job)
+        if self._summary_runner is not None:
+            self._summary_runner.enqueue(conversation_id, answer)
 
     def _enqueue_pending_summaries(self) -> None:
-        for conversation_id, answer in self._chats.pending_summary_jobs():
-            self._enqueue_summary(conversation_id, answer)
-        self._start_next_summary()
-
-    def _start_next_summary(self) -> None:
-        if self._summary_thread is not None or not self._summary_queue:
-            return
-        api_key = self._text_api_key()
-        if not api_key:
-            return
-        job = self._summary_queue.popleft()
-        if self._chats.get_conversation(job.conversation_id) is None:
-            self._start_next_summary()
-            return
-
-        self._summary_job = job
-        service = self._create_text_service(api_key)
-        self._summary_thread = QThread(self)
-        self._summary_worker = ChatWorker(
-            service,
-            MODEL_CHAT,
-            (),
-            job.request_text,
-            system_prompt=job.system_prompt,
-            temperature=0.2,
-        )
-        self._summary_worker.moveToThread(self._summary_thread)
-        self._summary_thread.started.connect(self._summary_worker.run)
-        self._summary_worker.completed.connect(self._on_summary_completed)
-        self._summary_worker.failed.connect(self._on_summary_failed)
-        self._summary_worker.cancelled.connect(self._on_summary_failed)
-        self._summary_worker.finished.connect(self._summary_thread.quit)
-        self._summary_thread.finished.connect(self._summary_finished)
-        self._summary_thread.start()
-
-    def _on_summary_completed(self, text: str) -> None:
-        if self._summary_job is None:
-            return
-        if self._summary_job.updates_role_state:
-            result = parse_role_postprocess(text)
-            summary = result.summary
-            if summary and result.role_state:
-                self._chats.set_role_state(
-                    self._summary_job.conversation_id,
-                    result.role_state,
-                )
-        else:
-            summary = clean_ai_summary(text)
-        if summary:
-            self._chats.set_ai_summary(
-                self._summary_job.conversation_id, summary
-            )
-        else:
-            self._chats.mark_summary_failed(
-                self._summary_job.conversation_id
-            )
-        self.conversations.refresh(select_id=self._conversation_id)
-
-    def _on_summary_failed(self, _error_code: str = "") -> None:
-        if self._summary_job is not None:
-            self._chats.mark_summary_failed(
-                self._summary_job.conversation_id
-            )
-            self.conversations.refresh(select_id=self._conversation_id)
-
-    def _summary_finished(self) -> None:
-        if self._summary_worker is not None:
-            self._summary_worker.deleteLater()
-        if self._summary_thread is not None:
-            self._summary_thread.deleteLater()
-        self._summary_worker = None
-        self._summary_thread = None
-        self._summary_job = None
-        self._start_next_summary()
+        if self._summary_runner is not None:
+            self._summary_runner.enqueue_pending()
 
     def _roleplay_temperature(self) -> float:
         try:
@@ -1478,6 +1203,11 @@ class MainWindow(QMainWindow):
     def _delete_current(self) -> None:
         if not self._conversation_id:
             return
+        if self._busy_generating():
+            QMessageBox.information(
+                self, "正在生成", "请等待当前回复完成后删除会话。"
+            )
+            return
         answer = QMessageBox.question(
             self,
             "删除会话",
@@ -1495,6 +1225,11 @@ class MainWindow(QMainWindow):
             self._new_conversation()
 
     def _clear_all(self) -> None:
+        if self._busy_generating():
+            QMessageBox.information(
+                self, "正在生成", "请等待当前回复完成后清空会话。"
+            )
+            return
         answer = QMessageBox.question(
             self,
             "清空全部会话",
@@ -1506,6 +1241,15 @@ class MainWindow(QMainWindow):
         self._conversation_id = None
         self.conversations.refresh()
         self._new_conversation()
+
+    def _busy_generating(self) -> bool:
+        """主消息管线或分段投递进行中；这些状态下删除会话会破坏落库。"""
+
+        return (
+            self._thread is not None
+            or self._delivery is not None
+            or self._pending_delivery is not None
+        )
 
     def _credentials_updated(self) -> None:
         if self._text_api_key() and not self._chats.list_conversations():
@@ -1529,7 +1273,6 @@ class MainWindow(QMainWindow):
         self._delivery = None
         self._pending_delivery = None
         self._delivery_segments.clear()
-        self._image_queue.clear()
         self.settings_page.shutdown_model_refresh()
         if self._notification_sound is not None:
             self._notification_sound.shutdown()
@@ -1540,14 +1283,8 @@ class MainWindow(QMainWindow):
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait(1500)
-        if self._summary_worker is not None:
-            self._summary_worker.cancel()
-        if self._summary_thread is not None:
-            self._summary_thread.quit()
-            self._summary_thread.wait(1500)
-        if self._image_worker is not None:
-            self._image_worker.cancel()
-        if self._image_thread is not None:
-            self._image_thread.quit()
-            self._image_thread.wait(1500)
+        if self._summary_runner is not None:
+            self._summary_runner.shutdown()
+        if self._image_runner is not None:
+            self._image_runner.shutdown()
         event.accept()
