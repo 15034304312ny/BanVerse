@@ -155,6 +155,16 @@ $env:DEEPSEEK_API_KEY = "你的 API Key"
 
 产物为单文件 `dist/BanVerse-1.0.0.exe`。可复制到其他目录并直接双击启动，不需要先打开命令行，也不会显示控制台窗口。API Key 不会被打入产物；用户仍需在首次启动时自行输入。生成图片和用户发送的聊天图片保存在 Qt 应用数据目录下的 `media` 子目录，数据库只记录本地路径。
 
+## 打包 Windows 安装包
+
+需要 Inno Setup 6（`ISCC.exe`）：
+
+```powershell
+& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
+```
+
+产物为 `dist/BanVerse-1.0.0-Setup.exe`：安装到 `Program Files\伴界 BanVerse`，创建开始菜单/桌面快捷方式，支持卸载。
+
 ## 打包 Android APK
 
 Qt 官方的 `pyside6-android-deploy` 目前需要 Linux 或 macOS。Windows
