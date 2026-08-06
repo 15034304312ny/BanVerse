@@ -416,7 +416,9 @@ def test_grsai_gateway_is_constructed_before_worker_leaves_ui_thread(
     database.close()
 
 
-def test_character_conversations_rotate_alternate_greetings(tmp_path, qtbot):
+def test_character_conversations_rotate_alternate_greetings(
+    tmp_path, qtbot, monkeypatch
+):
     database = Database(tmp_path / "chat.db")
     chats = ChatRepository(database)
     characters = CharacterRepository(database)
@@ -432,6 +434,8 @@ def test_character_conversations_rotate_alternate_greetings(tmp_path, qtbot):
         FakeCredentials(),
     )
     qtbot.addWidget(window)
+    # 本测试只验证开场白模板轮换；关闭 AI 主动开场避免真实请求与模板被清空。
+    monkeypatch.setattr(window, "_send_ai_opening", lambda *a, **k: None)
 
     for _ in range(4):
         window._new_character_conversation(character.id)
@@ -445,6 +449,89 @@ def test_character_conversations_rotate_alternate_greetings(tmp_path, qtbot):
         )
     ]
     assert openings == ["第一句", "第二句", "第三句", "第一句"]
+    window.close()
+    database.close()
+
+
+def test_new_character_conversation_ai_opening_clears_template(
+    tmp_path, qtbot
+):
+    """新建角色会话由 AI 主动生成开场白；成功后清空模板防重复。"""
+
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    card = empty_card("AI 开场角色")
+    card["data"]["first_mes"] = "模板开场白"
+    card["data"]["description"] = "会主动开场测试角色。"
+    character = characters.create(card)
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: FeatureGateway(),
+    )
+    qtbot.addWidget(window)
+
+    window._new_character_conversation(character.id)
+    conversation_id = database.connection.execute(
+        "SELECT id FROM conversations ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()[0]
+
+    # 等待 AI 开场请求完成（proactive turn 落库）
+    qtbot.waitUntil(
+        lambda: len(chats.list_turns(conversation_id)) == 1
+        and chats.list_turns(conversation_id)[-1].status == "completed",
+        timeout=5_000,
+    )
+    turn = chats.list_turns(conversation_id)[-1]
+    assert turn.origin == "proactive"
+    assert turn.assistant_content.startswith("夜色不错")
+    # 模板被清空，后续历史不再重复注入模板
+    assert chats.get_conversation(conversation_id).opening_message == ""
+    assert [m.role for m in chats.completed_history(conversation_id)] == [
+        "assistant"
+    ]
+    # 等投递与后台线程全部空闲后再关闭，避免迟到的流回调访问已关闭数据库
+    qtbot.waitUntil(
+        lambda: window._thread is None
+        and window._summary_thread is None
+        and window._image_thread is None
+        and window._delivery is None,
+        timeout=5_000,
+    )
+    window.close()
+    database.close()
+
+
+def test_ai_opening_without_api_key_falls_back_to_template(
+    tmp_path, qtbot, monkeypatch
+):
+    """无 API Key 时不触发 AI 开场，保留角色模板开场白。"""
+
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    card = empty_card("无 key 开场角色")
+    card["data"]["first_mes"] = "模板开场白"
+    character = characters.create(card)
+    window = MainWindow(chats, characters, settings, FakeCredentials())
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "_text_api_key", lambda: "")
+
+    window._new_character_conversation(character.id)
+    conversation_id = database.connection.execute(
+        "SELECT id FROM conversations ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()[0]
+
+    assert window._thread is None
+    assert chats.get_conversation(conversation_id).opening_message == (
+        "模板开场白"
+    )
+    assert len(chats.list_turns(conversation_id)) == 0
     window.close()
     database.close()
 

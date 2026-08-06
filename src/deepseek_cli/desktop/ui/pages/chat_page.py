@@ -212,7 +212,19 @@ class ChatPage(QWidget):
     def conversation_id(self) -> str | None:
         return self._conversation.id if self._conversation is not None else None
 
-    def load(self, conversation: Conversation, turns: list[Turn]) -> None:
+    def load(
+        self,
+        conversation: Conversation,
+        turns: list[Turn],
+        *,
+        defer_opening: bool = False,
+    ) -> None:
+        """加载会话；defer_opening=True 时暂不显示预设开场白模板。
+
+        新建角色会话改由 AI 主动生成开场白；在请求进行中先不显示角色卡
+        first_mes 模板，避免与 AI 生成的首条消息重复。
+        """
+
         self._conversation = conversation
         self.title.setText(conversation.title)
         self.model_combo.blockSignals(True)
@@ -221,7 +233,7 @@ class ChatPage(QWidget):
             self.model_combo.setCurrentIndex(index)
         self.model_combo.blockSignals(False)
         self._clear_messages()
-        if conversation.opening_message:
+        if conversation.opening_message and not defer_opening:
             self._add_bubble(
                 "assistant",
                 conversation.opening_message,

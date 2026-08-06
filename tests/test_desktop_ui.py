@@ -142,6 +142,21 @@ def test_chat_page_shows_and_removes_typing_indicator(qtbot):
     assert page._stream_bubble is None
 
 
+def test_chat_page_load_defers_opening(qtbot):
+    page = ChatPage()
+    qtbot.addWidget(page)
+    current = conversation(opening_message="模板开场白")
+
+    page.load(current, [])
+    bubbles = page._message_bubbles()
+    assert len(bubbles) == 1
+    assert bubbles[0].text_label.text() == "模板开场白"
+
+    # defer_opening=True（AI 开场进行中）时不显示模板
+    page.load(current, [], defer_opening=True)
+    assert page._message_bubbles() == []
+
+
 def test_chat_page_pins_to_bottom_and_hides_new_button(qtbot):
     page = ChatPage()
     qtbot.addWidget(page)

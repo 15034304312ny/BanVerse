@@ -177,6 +177,16 @@ class ChatRepository:
                 (character_id, _now(), conversation_id),
             )
 
+    def set_opening_message(self, conversation_id: str, opening: str) -> None:
+        """更新会话开场白：AI 开场成功后清空，失败时写回角色模板兜底。"""
+
+        with self._db:
+            self._db.execute(
+                """UPDATE conversations SET opening_message = ?, updated_at = ?
+                   WHERE id = ?""",
+                (opening, _now(), conversation_id),
+            )
+
     def set_model(self, conversation_id: str, model: str) -> None:
         with self._db:
             self._db.execute(

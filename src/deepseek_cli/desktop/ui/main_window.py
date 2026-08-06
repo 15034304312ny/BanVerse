@@ -49,6 +49,7 @@ from ..builtin_characters import BuiltinCharacterManager
 from ..data.repositories import (
     CharacterRepository,
     ChatRepository,
+    Conversation,
     SettingsRepository,
 )
 from ..flow import MessageFlowController, ReplyDelivery
@@ -103,6 +104,9 @@ class MainWindow(QMainWindow):
         self._notification_sound: NotificationSound | None = None
         self._shutting_down = False
         self._conversation_id: str | None = None
+        # AI 主动开场：新建角色会话时触发，成功则清空模板，失败/无 key 回退模板。
+        self._pending_opening_conversation_id: str | None = None
+        self._opening_fallbacks: dict[str, str] = {}
         self._proactive = ProactiveMessageScheduler(settings, self)
         self._summary_runner: SummaryRunner | None = None
         self._image_runner: AutonomousImageRunner | None = None
@@ -424,9 +428,14 @@ class MainWindow(QMainWindow):
             character_id=character.id,
             opening_message=opening,
         )
+        # 首条开场改由 AI 主动生成；模板（first_mes）仅作为兜底。load 时先
+        # 不显示模板，AI 开场成功则清空模板，失败/无 key 则回退显示模板。
+        self._pending_opening_conversation_id = conversation.id
+        self._opening_fallbacks[conversation.id] = opening
         self.conversations.refresh(select_id=conversation.id)
         self._show_messages()
         self.conversations.select(conversation.id)
+        self._send_ai_opening(conversation, opening)
 
     def _characters_changed(self) -> None:
         current = self._conversation_id
@@ -453,7 +462,11 @@ class MainWindow(QMainWindow):
         self._refresh_text_model_controls(conversation.model)
         if force_reload or not already_loaded:
             self.chat_page.load(
-                conversation, self._chats.list_turns(conversation_id)
+                conversation,
+                self._chats.list_turns(conversation_id),
+                defer_opening=(
+                    conversation_id == self._pending_opening_conversation_id
+                ),
             )
         if self._mobile_body is not None:
             self.message_nav.setChecked(True)
@@ -771,6 +784,12 @@ class MainWindow(QMainWindow):
             # 会话在流式生成期间被删除（外键级联删除了轮次）：
             # 放弃本轮投递，避免在排队槽中抛出未捕获异常。
             return
+        if request_kind == "opening":
+            # AI 开场成功：清空模板开场白，避免重开会话/后续历史与 AI
+            # 生成的首条消息重复。
+            self._pending_opening_conversation_id = None
+            self._opening_fallbacks.pop(conversation_id, "")
+            self._chats.set_opening_message(conversation_id, "")
         self._enqueue_summary(conversation_id, visible_answer)
         conversation = self._chats.get_conversation(conversation_id)
         character = (
@@ -827,7 +846,9 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not turn_id:
             return
-        if request_kind == "proactive":
+        if request_kind in {"proactive", "opening"}:
+            # 主动/开场消息失败不留失败气泡；开场失败由 _on_stream_cleaned_up
+            # 回退到角色模板。
             self._chats.delete_turn(turn_id)
         elif error_code:
             self._chats.fail_turn(turn_id, "failed", error_code)
@@ -855,6 +876,13 @@ class MainWindow(QMainWindow):
                     QApplication.alert(self, 5_000)
             return
         self.chat_page.finish_stream()
+        if request_kind == "opening":
+            # 开场请求失败：回退到角色模板开场白，保证新会话有内容可看。
+            self._pending_opening_conversation_id = None
+            fallback = self._opening_fallbacks.pop(
+                request_conversation_id or "", ""
+            )
+            self._ensure_opening_fallback(request_conversation_id, fallback)
         if (
             request_conversation_id
             and request_conversation_id == self._conversation_id
@@ -864,6 +892,17 @@ class MainWindow(QMainWindow):
             )
         if request_kind == "proactive" and not self.isActiveWindow():
             QApplication.alert(self, 5_000)
+
+    def _ensure_opening_fallback(
+        self, conversation_id: str, fallback: str
+    ) -> None:
+        """确保会话有开场白兜底文本（模板），供失败后重开显示。"""
+
+        if not conversation_id or not fallback:
+            return
+        conversation = self._chats.get_conversation(conversation_id)
+        if conversation is not None and not conversation.opening_message:
+            self._chats.set_opening_message(conversation_id, fallback)
 
     def _on_delivery_started(self, delivery: ReplyDelivery) -> None:
         self._active_delivery = delivery
@@ -973,6 +1012,85 @@ class MainWindow(QMainWindow):
             conversation_id=conversation.id,
             request_kind="proactive",
         )
+
+    def _send_ai_opening(
+        self,
+        conversation: Conversation,
+        fallback_opening: str,
+    ) -> None:
+        """新建角色会话后由 AI 主动生成首条开场白。
+
+        无 API Key、角色缺失或管线占线时直接回退到角色模板（fallback_opening）；
+        请求失败（流式错误）由 _on_stream_cleaned_up 回退；成功由
+        _on_turn_completed 清空模板，避免与 AI 生成的首条重复。
+        """
+
+        if self._flow is None or self._flow.busy:
+            self._recover_opening(conversation.id, fallback_opening)
+            return
+        api_key = self._text_api_key()
+        if not api_key:
+            self._recover_opening(conversation.id, fallback_opening)
+            return
+        character = self._characters.get(conversation.character_id)
+        if character is None:
+            self._recover_opening(conversation.id, fallback_opening)
+            return
+
+        history = self._chats.completed_history(
+            conversation.id, max_turns=16
+        )
+        current_time = datetime.now().astimezone()
+        character_prompt = build_character_prompt(
+            character.card,
+            history,
+            "",
+            user_name=self._settings.get("user_name", "用户"),
+            user_persona=self._settings.get("user_persona", ""),
+            role_state=self._role_state(conversation),
+            current_time=current_time,
+        )
+        turn = self._chats.create_proactive_turn(
+            conversation.id, conversation.model
+        )
+        self._chats.mark_streaming(turn.id)
+        self.chat_page.add_assistant_stream()
+        self.chat_page.set_generating(True)
+        system_prompt = "\n\n".join(
+            part
+            for part in (
+                character_prompt.system,
+                PROACTIVE_SYSTEM_SUFFIX,
+            )
+            if part.strip()
+        )
+        self._flow.begin_stream(
+            service=self._create_text_service(api_key),
+            model=conversation.model,
+            history=history,
+            request_text=proactive_request(
+                character.name, current_time=current_time
+            ),
+            system_prompt=system_prompt,
+            example_messages=character_prompt.examples,
+            temperature=(
+                self._roleplay_temperature()
+                if conversation.model == MODEL_CHAT
+                else None
+            ),
+            turn_id=turn.id,
+            conversation_id=conversation.id,
+            request_kind="opening",
+        )
+
+    def _recover_opening(self, conversation_id: str, fallback: str) -> None:
+        """AI 开场不可用（无 key/角色缺失）时回退到角色模板开场白。"""
+
+        self._pending_opening_conversation_id = None
+        self._opening_fallbacks.pop(conversation_id, "")
+        self._ensure_opening_fallback(conversation_id, fallback)
+        if conversation_id == self._conversation_id:
+            self._open_conversation(conversation_id, force_reload=True)
 
     def _enqueue_summary(self, conversation_id: str, answer: str) -> None:
         if self._summary_runner is not None:
