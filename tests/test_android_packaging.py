@@ -141,6 +141,10 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
     assert module_spec is not None and module_spec.loader is not None
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
+    # patch_buildozer_spec 从 pyproject.toml 读取版本；临时目录需提供该项目根。
+    (tmp_path / "pyproject.toml").write_text(
+        f'version = "{PROJECT_VERSION}"\n', encoding="utf-8"
+    )
     spec = tmp_path / "buildozer.spec"
     spec.write_text(
         (
@@ -170,7 +174,7 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
     assert "wav" in rendered
     assert "android.api = 36" in rendered
     assert "android.minapi = 28" in rendered
-    assert "version = 0.1.12" in rendered
+    assert f"version = {PROJECT_VERSION}" in rendered
     assert "requirements = python3==3.11.13,hostpython3==3.11.13" in rendered
     assert "plugins_multimedia_ffmpegmediaplugin" not in rendered
     assert "plugins_multimedia_androidmediaplugin" in rendered

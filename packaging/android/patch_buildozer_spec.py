@@ -4,7 +4,30 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import re
 from pathlib import Path
+
+
+# 版本唯一权威来源是 pyproject.toml；buildozer.spec 的 version 从这里读取，
+# 避免硬编码导致 Android 产物版本漂移（见 packaging/check_version_consistency.py）。
+def _project_root(path: Path) -> Path:
+    """从任意文件向上定位包含 pyproject.toml 的项目根。"""
+
+    for parent in path.resolve().parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    raise SystemExit("未找到 pyproject.toml（项目根）")
+
+
+def _project_version(root: Path) -> str:
+    match = re.search(
+        r'^version = "([^"]+)"',
+        (root / "pyproject.toml").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if not match:
+        raise SystemExit("pyproject.toml 中缺少 version 定义")
+    return match.group(1)
 
 REQUIRED_EXTENSIONS = {
     "py",
@@ -92,7 +115,8 @@ def patch_buildozer_spec(
     config.set("app", "title", "伴界 BanVerse")
     config.set("app", "package.name", "deepseekchat")
     config.set("app", "package.domain", "app.deepseekchat")
-    config.set("app", "version", "0.1.12")
+    project_root = _project_root(path)
+    config.set("app", "version", _project_version(project_root))
     requirements = _comma_values(
         config.get("app", "requirements", fallback="")
     )
