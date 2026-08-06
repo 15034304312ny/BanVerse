@@ -196,6 +196,54 @@ def test_main_window_uses_single_column_android_navigation(
     database.close()
 
 
+def test_desktop_reopening_conversation_scrolls_to_latest(tmp_path, qtbot):
+    """桌面端打开/重开/切回会话时自动滚动到最新消息。"""
+
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    conversation = chats.create_conversation(title="长对话")
+    for index in range(30):
+        turn = chats.create_turn(
+            conversation.id,
+            f"用户问题 {index}：这是一段用于换行测试的较长内容。",
+            "deepseek-v4-flash",
+        )
+        chats.complete_turn(
+            turn.id,
+            f"回答 {index}：这是一段比较长的助手回复，用于验证打开会话时"
+            "自动滚动到最新消息。" + "更多内容。" * 20,
+        )
+
+    window = MainWindow(chats, characters, settings, FakeCredentials())
+    qtbot.addWidget(window)
+    window.show()
+    bar = window.chat_page.scroll.verticalScrollBar()
+    qtbot.waitUntil(lambda: bar.maximum() > 0, timeout=2000)
+    qtbot.waitUntil(
+        lambda: bar.maximum() - bar.value() <= 40, timeout=2000
+    )
+
+    # 用户上滑到顶后重新打开同一会话（already_loaded，不重新 load）应滚回最新
+    bar.setValue(0)
+    window._open_conversation(conversation.id)
+    qtbot.waitUntil(
+        lambda: bar.maximum() - bar.value() <= 40, timeout=2000
+    )
+
+    # 切到角色页再切回消息页，也应滚回最新消息
+    bar.setValue(0)
+    window._show_characters()
+    window._show_messages()
+    qtbot.waitUntil(
+        lambda: bar.maximum() - bar.value() <= 40, timeout=2000
+    )
+
+    window.close()
+    database.close()
+
+
 def test_main_window_routes_images_to_siliconflow(tmp_path, qtbot):
     database = Database(tmp_path / "chat.db")
     chats = ChatRepository(database)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -150,6 +150,12 @@ class ChatPage(QWidget):
         self.scroll.verticalScrollBar().rangeChanged.connect(
             self._on_scroll_range_changed
         )
+        # 延迟到下次事件循环迭代再滚到底部：打开/切换会话时页面可能尚未
+        # 完成布局激活，直接滚动会停在旧最大值（QTBUG-35250），延迟后
+        # 布局已生效，滚动位置准确。
+        self._latest_timer = QTimer(self)
+        self._latest_timer.setSingleShot(True)
+        self._latest_timer.timeout.connect(self._scroll_to_bottom)
         self.scroll.verticalScrollBar().valueChanged.connect(
             self._on_scroll_value_changed
         )
@@ -298,7 +304,7 @@ class ChatPage(QWidget):
                     retry_enabled=False,
                 )
         self.set_available(True)
-        self._scroll_to_bottom()
+        self.scroll_to_latest()
 
     def add_user_message(
         self,
@@ -504,6 +510,16 @@ class ChatPage(QWidget):
         model = self.model_combo.itemData(index)
         if model and self._conversation is not None:
             self.model_changed.emit(model)
+
+    def scroll_to_latest(self) -> None:
+        """延迟到下次事件循环迭代滚动到最新消息（打开/切换会话时调用）。
+
+        页面显示后布局激活是异步的；直接滚动会基于尚未生效的旧最大值而
+        停在错误位置（QTBUG-35250）。延迟一拍后布局已生效，能准确钉在
+        最新消息处。重复调用只重启定时器，不会重复滚动。
+        """
+
+        self._latest_timer.start(0)
 
     def _scroll_to_bottom(self) -> None:
         bar = self.scroll.verticalScrollBar()

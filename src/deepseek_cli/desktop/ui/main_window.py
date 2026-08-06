@@ -368,6 +368,9 @@ class MainWindow(QMainWindow):
         self.content.setCurrentWidget(self.chat_page)
         if self._mobile_body is not None:
             self._mobile_body.setCurrentWidget(self.conversations)
+        elif not self._flow or not self._flow.busy:
+            # 桌面端回到消息页时，把当前会话滚到最新消息处。
+            self.chat_page.scroll_to_latest()
 
     def _show_characters(self) -> None:
         self.character_nav.setChecked(True)
@@ -456,6 +459,9 @@ class MainWindow(QMainWindow):
             self.message_nav.setChecked(True)
             self.content.setCurrentWidget(self.chat_page)
             self._mobile_body.setCurrentWidget(self.content)
+        # 打开（含已加载会话重新打开）时都滚到最新消息处；load 内部已触发，
+        # 这里覆盖 already_loaded 不重新 load 的路径。
+        self.chat_page.scroll_to_latest()
 
     def _open_current_mobile_conversation(self, item) -> None:
         """再次点击已选中的会话时，也能从移动端列表进入聊天页。"""
