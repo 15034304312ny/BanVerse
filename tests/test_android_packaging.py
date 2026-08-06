@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import struct
 import sys
 import zipfile
@@ -9,6 +10,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ANDROID_DIR = PROJECT_ROOT / "packaging" / "android"
 P4A_COMMIT = "0382d27de2f7315ed98e74884bafb30365decdee"
+PROJECT_VERSION = (
+    re.search(
+        r'^version = "([^"]+)"',
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+).group(1)
 
 
 def _load_prepare_module():
@@ -106,7 +114,8 @@ def test_android_build_script_uses_official_qt_wheels_and_deployer():
     assert '--sdk-path "${SDK_PATH}"' in script
     assert "--init" in script
     assert "patch_buildozer_spec.py" in script
-    assert 'APP_VERSION="0.1.12"' in script
+    app_version = f'APP_VERSION="{PROJECT_VERSION}"'
+    assert app_version in script
     assert "BanVerse-${APP_VERSION}-android16-arm64-v8a-debug.apk" in script
     assert "deepseekchat-${APP_VERSION}-arm64-v8a-debug.apk" in script
     assert "reset --hard" not in script

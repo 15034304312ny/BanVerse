@@ -44,7 +44,7 @@ exe = EXE(
     analysis.binaries,
     analysis.datas,
     [],
-    name="BanVerse",
+    name="BanVerse-1.0.0",
     icon=str(app_icon),
     debug=False,
     bootloader_ignore_signals=False,

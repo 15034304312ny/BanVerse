@@ -153,7 +153,7 @@ $env:DEEPSEEK_API_KEY = "你的 API Key"
 .\.venv\Scripts\pyinstaller.exe packaging\deepseek_app.spec
 ```
 
-产物为单文件 `dist/BanVerse.exe`。可复制到其他目录并直接双击启动，不需要先打开命令行，也不会显示控制台窗口。API Key 不会被打入产物；用户仍需在首次启动时自行输入。生成图片和用户发送的聊天图片保存在 Qt 应用数据目录下的 `media` 子目录，数据库只记录本地路径。
+产物为单文件 `dist/BanVerse-1.0.0.exe`。可复制到其他目录并直接双击启动，不需要先打开命令行，也不会显示控制台窗口。API Key 不会被打入产物；用户仍需在首次启动时自行输入。生成图片和用户发送的聊天图片保存在 Qt 应用数据目录下的 `media` 子目录，数据库只记录本地路径。
 
 ## 打包 Android APK
 

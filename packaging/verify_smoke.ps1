@@ -1,4 +1,4 @@
-# Unattended smoke test: launch dist/BanVerse.exe, confirm the app window renders, then exits.
+# Unattended smoke test: launch dist/BanVerse-1.0.0.exe, confirm the app window renders, then exits.
 #
 # Usage: powershell -ExecutionPolicy Bypass -File packaging\verify_smoke.ps1
 #
@@ -7,12 +7,12 @@
 #
 # Note: PyInstaller onefile spawns a child process that owns the real window; the
 # parent bootloader process has no MainWindowHandle. So we detect the window by
-# polling all "BanVerse" processes for a non-null MainWindowHandle instead of
+# polling all "BanVerse-1.0.0" processes for a non-null MainWindowHandle instead of
 # tracking a single Process object.
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$Exe = Join-Path $ProjectRoot "dist\BanVerse.exe"
+$Exe = Join-Path $ProjectRoot "dist\BanVerse-1.0.0.exe"
 
 if (-not (Test-Path $Exe)) {
     Write-Error "Artifact not found: $Exe"
@@ -32,7 +32,7 @@ $Deadline = (Get-Date).AddSeconds(120)
 $WindowSeen = $false
 $AllExited = $false
 while ((Get-Date) -lt $Deadline) {
-    $Procs = @(Get-Process BanVerse -ErrorAction SilentlyContinue)
+    $Procs = @(Get-Process "BanVerse-1.0.0" -ErrorAction SilentlyContinue)
     if ($Procs.Count -eq 0) {
         $AllExited = $true
         break
@@ -52,13 +52,13 @@ while ((Get-Date) -lt $Deadline) {
 
 # Refresh exit state one more time.
 if (-not $AllExited) {
-    $Procs = @(Get-Process BanVerse -ErrorAction SilentlyContinue)
+    $Procs = @(Get-Process "BanVerse-1.0.0" -ErrorAction SilentlyContinue)
     if ($Procs.Count -eq 0) { $AllExited = $true }
 }
 
 if (-not $AllExited) {
-    Write-Warning "Timed out waiting for exit. Killing all BanVerse processes."
-    Get-Process BanVerse -ErrorAction SilentlyContinue | Stop-Process -Force
+    Write-Warning "Timed out waiting for exit. Killing all BanVerse-1.0.0 processes."
+    Get-Process "BanVerse-1.0.0" -ErrorAction SilentlyContinue | Stop-Process -Force
     $ExitCode = -1
 } else {
     $ExitCode = $Parent.ExitCode
