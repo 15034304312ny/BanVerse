@@ -49,6 +49,12 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
     }}
     QPushButton#navButton:hover {{ background: {c['nav_hover']}; color: white; }}
     QPushButton#navButton:checked {{ background: {c['primary']}; color: white; }}
+    QPushButton#newMessageButton {{
+        background: {c['primary']}; color: white; border: none;
+        border-radius: 16px; padding: 6px 14px; font-weight: 600;
+    }}
+    QPushButton#newMessageButton:hover {{ background: {c['primary_hover']}; }}
+    QPushButton#newMessageButton:pressed {{ background: {c['primary_pressed']}; }}
     QPushButton#stickerButton {{
         font-family: "Segoe UI Emoji"; font-size: 24px; padding: 0;
         border-radius: 12px; background: {c['surface_alt']};

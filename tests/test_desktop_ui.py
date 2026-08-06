@@ -142,6 +142,51 @@ def test_chat_page_shows_and_removes_typing_indicator(qtbot):
     assert page._stream_bubble is None
 
 
+def test_chat_page_pins_to_bottom_and_hides_new_button(qtbot):
+    page = ChatPage()
+    qtbot.addWidget(page)
+    page.resize(400, 600)
+    page.show()
+    for _ in range(30):
+        page.add_assistant_segment("多行文本" * 20)
+    qtbot.waitUntil(
+        lambda: page.scroll.verticalScrollBar().maximum() > 0, timeout=2000
+    )
+    assert not page.new_message_button.isVisible()
+    page.add_assistant_segment("贴底新消息")
+    assert not page.new_message_button.isVisible()
+    qtbot.waitUntil(
+        lambda: page.scroll.verticalScrollBar().maximum()
+        - page.scroll.verticalScrollBar().value()
+        <= 160,
+        timeout=2000,
+    )
+
+
+def test_chat_page_new_message_button_jumps_to_latest(qtbot):
+    page = ChatPage()
+    qtbot.addWidget(page)
+    page.resize(400, 600)
+    page.show()
+    for _ in range(30):
+        page.add_assistant_segment("多行文本" * 20)
+    qtbot.waitUntil(
+        lambda: page.scroll.verticalScrollBar().maximum() > 0, timeout=2000
+    )
+    bar = page.scroll.verticalScrollBar()
+    bar.setValue(0)
+    page.add_assistant_segment("上滑阅读时到达的新消息")
+    assert page.new_message_button.isVisible()
+    assert page.new_message_button.text() == "最新消息"
+    page.add_assistant_segment("又一条新消息")
+    assert page.new_message_button.text() == "最新消息 · 2"
+    page.new_message_button.click()
+    assert not page.new_message_button.isVisible()
+    qtbot.waitUntil(
+        lambda: bar.maximum() - bar.value() <= 160, timeout=2000
+    )
+
+
 def test_android_chat_reload_hides_old_bubbles(monkeypatch, qtbot):
     monkeypatch.setenv("DEEPSEEK_CHAT_PLATFORM", "android")
     page = ChatPage()
@@ -149,15 +194,12 @@ def test_android_chat_reload_hides_old_bubbles(monkeypatch, qtbot):
     current = conversation(opening_message="第一次加载")
 
     page.load(current, [])
-    old_bubble = page.messages_layout.itemAt(0).widget()
+    old_bubble = page._message_bubbles()[0]
     page.load(current, [])
 
     assert old_bubble.isHidden()
     assert old_bubble.parent() is page.messages
-    bubbles = [
-        page.messages_layout.itemAt(index).widget()
-        for index in range(page.messages_layout.count() - 1)
-    ]
+    bubbles = page._message_bubbles()
     assert len(bubbles) == 1
     assert isinstance(bubbles[0], MessageBubble)
     assert bubbles[0].text_label.text() == "第一次加载"

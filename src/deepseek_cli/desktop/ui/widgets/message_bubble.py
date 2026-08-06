@@ -51,6 +51,7 @@ class MessageBubble(QWidget):
         self._image_preview_width = 0
         self._speech_state = "idle"
         self._chat_width = 0
+        self._fixed_width = 0
         self._mobile = is_android_platform()
         self._source_pixmap = QPixmap()
 
@@ -206,6 +207,12 @@ class MessageBubble(QWidget):
         if role != "user":
             row.addStretch(1)
 
+    @property
+    def chat_bubble_width(self) -> int:
+        """气泡实际宽度；用于按宽度计算自动换行后的真实高度。"""
+
+        return self._fixed_width or self.bubble.width() or 0
+
     def set_chat_width(self, viewport_width: int) -> None:
         """根据聊天视口分配稳定且可读的气泡宽度。"""
 
@@ -233,6 +240,7 @@ class MessageBubble(QWidget):
                 width = max(160, int(available * 0.90))
                 width = min(available, width)
             self.bubble.setFixedWidth(width)
+            self._fixed_width = width
             text_width = max(0, width - 24)
             self.text_label.setMinimumWidth(0)
             self.text_label.setMaximumWidth(text_width)
@@ -266,11 +274,13 @@ class MessageBubble(QWidget):
                 natural = max(natural, self._image_preview_width + 24)
             width = min(maximum, max(160, natural))
             self.bubble.setFixedWidth(width)
+            self._fixed_width = width
             self.text_label.setMinimumWidth(max(136, width - 24))
             self.text_label.setMaximumWidth(max(136, width - 24))
         else:
             width = min(900, max(420, int(available * 0.76)))
             self.bubble.setFixedWidth(width)
+            self._fixed_width = width
             self.text_label.setMinimumWidth(max(0, width - 24))
             self.text_label.setMaximumWidth(max(0, width - 24))
         self.text_label.updateGeometry()

@@ -134,7 +134,10 @@ class ChatPage(QWidget):
         self.messages_layout = QVBoxLayout(self.messages)
         self.messages_layout.setContentsMargins(0, 18, 0, 18)
         self.messages_layout.setSpacing(0)
-        self.messages_layout.addStretch(1)
+        # 顶部伸展占位：内容不足一屏时气泡贴底排列（最新消息紧贴输入框
+        # 上方），内容增长时向上扩展，最新消息始终锚定在输入框上方、下方
+        # 不残留空白。
+        self.messages_layout.insertStretch(0, 1)
         self.scroll.setWidget(self.messages)
         # 布局激活（气泡插入、移除、宽度变化）会更新滚动条 range；在
         # maximum 变真后若正钉在底部则补滚到真实最大，避免"旧值欠滚"
@@ -143,7 +146,20 @@ class ChatPage(QWidget):
         self.scroll.verticalScrollBar().rangeChanged.connect(
             self._on_scroll_range_changed
         )
+        self.scroll.verticalScrollBar().valueChanged.connect(
+            self._on_scroll_value_changed
+        )
         self.scroll.viewport().installEventFilter(self)
+        # 收到新消息而用户上滑阅读历史时，浮出"最新消息"按钮用于跳回底部。
+        self._new_message_count = 0
+        self.new_message_button = QPushButton("最新消息")
+        self.new_message_button.setObjectName("newMessageButton")
+        self.new_message_button.setAccessibleName("滚动到最新消息")
+        self.new_message_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_message_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.new_message_button.setParent(self.scroll.viewport())
+        self.new_message_button.hide()
+        self.new_message_button.clicked.connect(self._jump_to_latest)
         layout.addWidget(self.scroll, 1)
 
         self.composer = ChatComposer()
@@ -296,7 +312,7 @@ class ChatPage(QWidget):
         """显示一条没有用户前置消息的角色主动回复。"""
 
         self._stream_bubble = self._add_bubble("assistant", "")
-        self._scroll_to_bottom()
+        self._on_new_content()
 
     def discard_stream(self) -> None:
         """移除等待气泡，但保持输入区锁定直到分段投递结束。"""
@@ -319,7 +335,7 @@ class ChatPage(QWidget):
             "对方正在输入…",
             typing=True,
         )
-        self._scroll_to_bottom()
+        self._on_new_content()
 
     def add_assistant_segment(
         self,
@@ -340,7 +356,7 @@ class ChatPage(QWidget):
             image_path=image_path,
             reasoning=reasoning,
         )
-        self._scroll_to_bottom()
+        self._on_new_content()
 
     def add_image_error(self, error_code: str) -> None:
         message = _ERROR_MESSAGES.get(
@@ -380,6 +396,7 @@ class ChatPage(QWidget):
     def eventFilter(self, watched, event) -> bool:
         if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
             self._relayout_messages()
+            self._position_new_message_button()
         return super().eventFilter(watched, event)
 
     def _add_bubble(self, role: str, text: str, **kwargs) -> MessageBubble:
@@ -391,7 +408,8 @@ class ChatPage(QWidget):
         if message_key:
             self._speech_bubbles[message_key] = bubble
         bubble.set_chat_width(self.scroll.viewport().width())
-        self.messages_layout.insertWidget(self.messages_layout.count() - 1, bubble)
+        # 顶部伸展占位固定在 index 0，新气泡追加到列表末尾。
+        self.messages_layout.addWidget(bubble)
         return bubble
 
     def set_speech_state(self, message_key: str, state: str) -> None:
@@ -406,7 +424,7 @@ class ChatPage(QWidget):
           insets 变化触发 resize 风暴导致换行抖动。
         - 高度精确等于真实内容高度（至少视口高度）。内容溢出时不再残留
           "幽灵空白"，滚动条 maximum 即真实内容底部，钉底就能看到最新
-          气泡；内容不足一屏时消息靠上、下方留白不再可滚动。
+          气泡；内容不足一屏时消息贴底排列、最新消息紧贴输入框上方。
         """
 
         viewport = self.scroll.viewport()
@@ -420,28 +438,46 @@ class ChatPage(QWidget):
                 widget = self.messages_layout.itemAt(index).widget()
                 if isinstance(widget, MessageBubble):
                     widget.set_chat_width(width)
-        target = max(self.messages_layout.sizeHint().height(), height)
+        target = max(self._content_height(), height)
         if self.messages.height() != target:
             self.messages.setFixedHeight(target)
+
+    def _content_height(self) -> int:
+        """真实内容高度：各气泡在自身宽度下自动换行后的高度求和（含边距）。
+
+        QLabel 对自动换行文本的 sizeHint 高度按单行低估（布局未激活前返回
+        极小值），须用 heightForWidth 才能得到真实排布高度；否则内容 widget
+        高度不足、最新消息被裁剪。
+        """
+
+        total = 0
+        for index in range(self.messages_layout.count()):
+            widget = self.messages_layout.itemAt(index).widget()
+            if isinstance(widget, MessageBubble):
+                width = widget.chat_bubble_width
+                height = (
+                    widget.heightForWidth(width) if width > 0 else -1
+                )
+                total += height if height > 0 else widget.sizeHint().height()
+        margins = self.messages_layout.contentsMargins()
+        return total + margins.top() + margins.bottom()
 
     def _content_bottom(self) -> int:
         """真实内容底部对应的滚动位置，不依赖可能滞后的 widget 高度。
 
-        与 bar.maximum() 不同，这里直接按布局 sizeHint 计算，widget 高度
-        尚未被布局事件应用到滚动条 range 时结果仍然正确。
+        与 bar.maximum() 不同，这里直接按气泡 heightForWidth 计算，布局
+        事件尚未应用到滚动条 range 时结果仍然正确。
         """
 
-        return max(
-            0,
-            self.messages_layout.sizeHint().height()
-            - self.scroll.viewport().height(),
-        )
+        return max(0, self._content_height() - self.scroll.viewport().height())
 
     def _clear_messages(self) -> None:
         self.scroll.verticalScrollBar().setValue(0)
         self._speech_bubbles.clear()
+        self._hide_new_message_button()
+        # 顶部伸展占位保留在 index 0，仅移除其后追加的气泡。
         while self.messages_layout.count() > 1:
-            item = self.messages_layout.takeAt(0)
+            item = self.messages_layout.takeAt(1)
             widget = item.widget()
             if widget is not None:
                 # Keep deferred widgets out of Android's compositor while Qt
@@ -483,11 +519,82 @@ class ChatPage(QWidget):
         bar.setValue(self._content_bottom())
 
     def _on_scroll_range_changed(self, _minimum: int, maximum: int) -> None:
-        """布局激活、滚动条 range 更新后，若仍钉在底部则补滚到真实内容底部。"""
+        """布局激活、滚动条 range 更新后，若仍钉在底部则补滚到真实内容底部。
+
+        钉底标志由 _scroll_to_bottom 在用户贴底时置位；此时旧 maximum
+        可能把 setValue 夹取到欠滚位置，这里直接按真实内容底部重滚，
+        消除 QTBUG-35250 的欠滚（Android 上被放大）。
+        """
 
         if not self._pin_to_bottom:
             return
         self._pin_to_bottom = False
         bar = self.scroll.verticalScrollBar()
+        bar.setValue(self._content_bottom())
+
+    def _message_bubbles(self) -> list[MessageBubble]:
+        """当前可见的消息气泡（按时间顺序，不含顶部伸展占位）。"""
+
+        return [
+            self.messages_layout.itemAt(index).widget()
+            for index in range(self.messages_layout.count())
+            if isinstance(
+                self.messages_layout.itemAt(index).widget(), MessageBubble
+            )
+        ]
+
+    def _on_new_content(self) -> None:
+        """新内容加入后的滚动决策。
+
+        用户贴底时跟随滚动到底部；用户上滑阅读历史时不强拉视图，而是
+        浮出"最新消息"按钮提示有新消息、点击后跳回最新消息处。
+        """
+
+        bar = self.scroll.verticalScrollBar()
         if bar.maximum() - bar.value() <= 160:
-            bar.setValue(self._content_bottom())
+            self._scroll_to_bottom()
+        else:
+            # 用户上滑阅读时不强拉视图；但仍需重排内容高度，让新消息
+            # 真实可滚动到达，滚动范围随内容增长。同时解除可能残留的钉底
+            # 意图，避免随后的 rangeChanged 把视图拉回底部。
+            self._pin_to_bottom = False
+            self._relayout_messages()
+            self._new_message_count += 1
+            self._show_new_message_button()
+
+    def _on_scroll_value_changed(self, value: int) -> None:
+        bar = self.scroll.verticalScrollBar()
+        if bar.maximum() - value <= 160:
+            self._hide_new_message_button()
+        else:
+            # 用户上滑离开底部：解除钉底意图，避免随后的无关 rangeChanged
+            # 消费到过期 pin 而把视图拉回底部。
+            self._pin_to_bottom = False
+
+    def _jump_to_latest(self) -> None:
+        """点击"最新消息"按钮：回到最新消息处并收起按钮。"""
+
+        self._hide_new_message_button()
+        self._scroll_to_bottom()
+
+    def _show_new_message_button(self) -> None:
+        if self._new_message_count > 1:
+            self.new_message_button.setText(
+                f"最新消息 · {self._new_message_count}"
+            )
+        else:
+            self.new_message_button.setText("最新消息")
+        self._position_new_message_button()
+        self.new_message_button.show()
+        self.new_message_button.raise_()
+
+    def _hide_new_message_button(self) -> None:
+        self._new_message_count = 0
+        self.new_message_button.hide()
+
+    def _position_new_message_button(self) -> None:
+        viewport = self.scroll.viewport()
+        size = self.new_message_button.sizeHint()
+        x = max(8, viewport.width() - size.width() - 12)
+        y = max(8, viewport.height() - size.height() - 12)
+        self.new_message_button.move(x, y)

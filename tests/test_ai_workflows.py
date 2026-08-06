@@ -177,7 +177,7 @@ def test_main_window_uses_single_column_android_navigation(
     assert window._mobile is True
     assert window.minimumWidth() == 320
     assert window._mobile_body is not None
-    original_bubble = window.chat_page.messages_layout.itemAt(0).widget()
+    original_bubble = window.chat_page._message_bubbles()[0]
     window._show_messages()
     assert window._mobile_body.currentWidget() is window.conversations
 
@@ -186,7 +186,7 @@ def test_main_window_uses_single_column_android_navigation(
     )
     assert window._mobile_body.currentWidget() is window.content
     assert window.content.currentWidget() is window.chat_page
-    assert window.chat_page.messages_layout.itemAt(0).widget() is original_bubble
+    assert window.chat_page._message_bubbles()[0] is original_bubble
 
     window._show_characters()
     assert window._mobile_body.currentWidget() is window.content
@@ -886,12 +886,11 @@ def test_role_reply_is_hidden_then_delivered_as_typed_segments_and_image(
         "你看，云边像被点亮了一样。"
     )
     assert "走到窗边" not in speech.calls[0][1]
-    visible_texts = []
-    for index in range(window.chat_page.messages_layout.count() - 1):
-        widget = window.chat_page.messages_layout.itemAt(index).widget()
-        text_label = getattr(widget, "text_label", None)
-        if text_label is not None and text_label.text().strip():
-            visible_texts.append(text_label.text())
+    visible_texts = [
+        widget.text_label.text()
+        for widget in window.chat_page._message_bubbles()
+        if widget.text_label is not None and widget.text_label.text().strip()
+    ]
     assert visible_texts.count("刚下班，我正好赶上今天的晚霞。") == 1
     assert visible_texts.count("（她走到窗边，轻轻拉开窗帘）") == 1
     assert visible_texts.count("你看，云边像被点亮了一样。") == 1
