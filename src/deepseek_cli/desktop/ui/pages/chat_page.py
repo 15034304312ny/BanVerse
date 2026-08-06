@@ -58,6 +58,10 @@ class ChatPage(QWidget):
     speech_requested = Signal(str, str)
     speech_stop_requested = Signal(str)
 
+    # 距底部的"贴底"判定阈值：仅当几乎贴底时才自动跟随新内容，避免用户
+    # 上滑阅读历史时被新消息反复拉回底部。
+    _BOTTOM_THRESHOLD = 40
+
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("chatPage")
@@ -149,6 +153,12 @@ class ChatPage(QWidget):
         self.scroll.verticalScrollBar().valueChanged.connect(
             self._on_scroll_value_changed
         )
+        if self._mobile:
+            # 手势/惯性结束后补判：不打断用户的甩动，等动画停下再决定
+            # 补滚到底部或浮出未读按钮。
+            QScroller.scroller(self.scroll.viewport()).stateChanged.connect(
+                self._on_scroller_state_changed
+            )
         self.scroll.viewport().installEventFilter(self)
         # 收到新消息而用户上滑阅读历史时，浮出"最新消息"按钮用于跳回底部。
         self._new_message_count = 0
@@ -495,11 +505,6 @@ class ChatPage(QWidget):
         if model and self._conversation is not None:
             self.model_changed.emit(model)
 
-    def _scroll_if_near_bottom(self) -> None:
-        bar = self.scroll.verticalScrollBar()
-        if bar.maximum() - bar.value() < 120:
-            self._scroll_to_bottom()
-
     def _scroll_to_bottom(self) -> None:
         bar = self.scroll.verticalScrollBar()
         if self._mobile:
@@ -514,7 +519,7 @@ class ChatPage(QWidget):
         # 直接按真实内容底部滚动，不依赖可能滞后的 bar.maximum()
         # （QTBUG-35250：布局激活前 maximum 过时，会把最新气泡顶到
         # 视口之外）；同时记录贴底意图，等 rangeChanged 补滚兜底。
-        if bar.maximum() - bar.value() <= 160:
+        if bar.maximum() - bar.value() <= self._BOTTOM_THRESHOLD:
             self._pin_to_bottom = True
         bar.setValue(self._content_bottom())
 
@@ -546,12 +551,20 @@ class ChatPage(QWidget):
     def _on_new_content(self) -> None:
         """新内容加入后的滚动决策。
 
-        用户贴底时跟随滚动到底部；用户上滑阅读历史时不强拉视图，而是
-        浮出"最新消息"按钮提示有新消息、点击后跳回最新消息处。
+        用户贴底时跟随滚动到底部；用户正在拖动/惯性滚动时不打断手势
+        （否则会截断甩动并反复拉回底部）；用户上滑阅读时浮出"最新消息"
+        按钮，点击后跳回最新消息处。
         """
 
         bar = self.scroll.verticalScrollBar()
-        if bar.maximum() - bar.value() <= 160:
+        if self._scroller_active():
+            # 手势或惯性进行中：不强拉视图、不打断手势，只重排内容高度
+            # 让新内容真实可滚动到达，并计入未读；等手势结束（Inactive）
+            # 后由 stateChanged 决定补滚到底部或浮出未读按钮。
+            self._relayout_messages()
+            self._new_message_count += 1
+            return
+        if bar.maximum() - bar.value() <= self._BOTTOM_THRESHOLD:
             self._scroll_to_bottom()
         else:
             # 用户上滑阅读时不强拉视图；但仍需重排内容高度，让新消息
@@ -564,12 +577,38 @@ class ChatPage(QWidget):
 
     def _on_scroll_value_changed(self, value: int) -> None:
         bar = self.scroll.verticalScrollBar()
-        if bar.maximum() - value <= 160:
+        if bar.maximum() - value <= self._BOTTOM_THRESHOLD:
             self._hide_new_message_button()
         else:
             # 用户上滑离开底部：解除钉底意图，避免随后的无关 rangeChanged
             # 消费到过期 pin 而把视图拉回底部。
             self._pin_to_bottom = False
+
+    def _scroller_active(self) -> bool:
+        """QScroller 是否处于拖动/惯性/回弹等非静止状态。"""
+
+        if not self._mobile:
+            return False
+        scroller = QScroller.scroller(self.scroll.viewport())
+        return (
+            scroller is not None
+            and scroller.state() != QScroller.State.Inactive
+        )
+
+    def _on_scroller_state_changed(self, _state: object) -> None:
+        """手势/惯性结束（回到 Inactive）后补判。
+
+        手势期间到达的新内容可能使视图不再贴底；这里在动画停下后补滚到
+        最新或浮出未读按钮，避免"甩动中被截断拉回底部"的生涩与反复。
+        """
+
+        if not self._mobile or self._scroller_active():
+            return
+        bar = self.scroll.verticalScrollBar()
+        if bar.maximum() - bar.value() <= self._BOTTOM_THRESHOLD:
+            self._scroll_to_bottom()
+        elif self._new_message_count > 0:
+            self._show_new_message_button()
 
     def _jump_to_latest(self) -> None:
         """点击"最新消息"按钮：回到最新消息处并收起按钮。"""
