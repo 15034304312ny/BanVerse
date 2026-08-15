@@ -107,7 +107,22 @@ class FeatureGateway:
     def stream_chat(
         self, _model, _messages, *, system_prompt="", temperature=None
     ):
-        if "列表摘要与连续性记录器" in system_prompt:
+        if "Character Card V2 编剧" in system_prompt:
+            yield StreamDelta(
+                content=(
+                    '{"name":"顾遥","description":"二十八岁的城市声音采集师，'
+                    '短发，常背着旧录音机在街巷工作。","personality":"观察敏锐但'
+                    '不擅长直接安慰人，说话简短，会用收集到的声音分享心情并尊重边界。",'
+                    '"scenario":"雨夜里她从城市兴趣群添加了用户，正在屋檐下整理录音。",'
+                    '"first_mes":"嗨，刚加上你。今晚的雨声很好听，你会给它取什么名字？",'
+                    '"alternate_greetings":["用一段电车声和你打个招呼。",'
+                    '"你喜欢城市里的哪一种声音？"],"mes_example":"<START>\\n'
+                    '{{user}}: 今天录到了什么？\\n{{char}}: 屋檐雨，还有末班车关门前的提示音。",'
+                    '"creator_notes":"克制、敏锐的都市声音采集师。",'
+                    '"tags":["现代都市","声音采集","慢热"]}'
+                )
+            )
+        elif "列表摘要与连续性记录器" in system_prompt:
             yield StreamDelta(
                 content=(
                     '{"summary":"双方继续讨论未完成的调查",'
@@ -797,6 +812,59 @@ def test_main_window_generates_summary_and_proactive_assistant_turn(
         timeout=5_000,
     )
     assert notification.play_count == 2
+
+    window.close()
+    database.close()
+
+
+def test_random_character_is_generated_as_new_contact_without_switching_chat(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("character_discovery_enabled", "true")
+    settings.set("character_discovery_daily_limit", "1")
+    existing = characters.create(empty_card("已有角色"))
+    current = chats.create_conversation(
+        title=existing.name, character_id=existing.id
+    )
+    notification = FakeNotificationSound()
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: FeatureGateway(),
+        notification_sound=notification,
+    )
+    qtbot.addWidget(window)
+
+    window._generate_random_character()
+    qtbot.waitUntil(
+        lambda: len(characters.list()) == 2
+        and window._character_discovery_thread is None,
+        timeout=5_000,
+    )
+
+    discovered = next(
+        character for character in characters.list() if character.name == "顾遥"
+    )
+    contact = next(
+        conversation
+        for conversation in chats.list_conversations()
+        if conversation.character_id == discovered.id
+    )
+    assert contact.opening_message.startswith("嗨，刚加上你")
+    assert window._conversation_id == current.id
+    assert settings.get("character_discovery_count") == "1"
+    assert settings.get("character_discovery_last_name") == "顾遥"
+    assert notification.play_count == 1
+
+    # 当日上限生效：再次到期不会调用模型或新增联系人。
+    window._generate_random_character()
+    assert len(characters.list()) == 2
 
     window.close()
     database.close()

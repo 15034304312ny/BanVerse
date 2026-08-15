@@ -439,6 +439,14 @@ def test_settings_separates_text_image_and_tts_providers(tmp_path, qtbot):
     assert page.user_name.text() == "用户"
     assert page.roleplay_temperature.value() == 1.3
     assert page.role_memory_enabled.isChecked()
+    assert not page.character_discovery_enabled.isChecked()
+    assert not page.character_discovery_min_minutes.isEnabled()
+    page.character_discovery_enabled.setChecked(True)
+    assert page.character_discovery_min_minutes.isEnabled()
+    assert page.character_discovery_max_minutes.isEnabled()
+    assert page.character_discovery_daily_limit.isEnabled()
+    assert page._settings.get("character_discovery_enabled") == "true"
+    assert "新联系人会话" in labels
     assert "伴界 BanVerse" in labels
     database.close()
 

@@ -14,15 +14,19 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QThread
 
+from ..character_cards import CharacterCardError
 from ..model_catalog import MODEL_CHAT
 from .ai_features import (
     AUTONOMOUS_IMAGE_SYSTEM_PROMPT,
+    CHARACTER_DISCOVERY_SYSTEM_PROMPT,
     ROLE_MEMORY_SYSTEM_PROMPT,
     SUMMARY_SYSTEM_PROMPT,
     AutonomousImageDecision,
     autonomous_image_request,
+    character_discovery_request,
     clean_ai_summary,
     parse_autonomous_image_decision,
+    parse_discovered_character,
     parse_role_postprocess,
     role_memory_request,
     summary_request,
@@ -223,6 +227,101 @@ class SummaryRunner(QObject):
     def shutdown(self) -> None:
         self._shutting_down = True
         self._queue.clear()
+        if self._worker is not None:
+            self._worker.cancel()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(1500)
+
+
+class CharacterDiscoveryRunner(QObject):
+    """在后台生成一张受控角色卡；持久化由 UI 线程回调完成。"""
+
+    def __init__(
+        self,
+        *,
+        create_text_service: Callable[[str], Any],
+        text_api_key: Callable[[], str],
+        on_generated: Callable[[dict], None],
+        on_error: Callable[[str], None],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._create_text_service = create_text_service
+        self._text_api_key = text_api_key
+        self._on_generated = on_generated
+        self._on_error = on_error
+        self._thread: QThread | None = None
+        self._worker: ChatWorker | None = None
+        self._existing_names: tuple[str, ...] = ()
+        self._shutting_down = False
+
+    @property
+    def thread(self) -> QThread | None:
+        return self._thread
+
+    @property
+    def busy(self) -> bool:
+        return self._thread is not None
+
+    def generate(
+        self,
+        existing_characters: tuple[tuple[str, str], ...],
+        *,
+        user_name: str,
+        user_persona: str,
+    ) -> bool:
+        if self._shutting_down or self._thread is not None:
+            return False
+        api_key = self._text_api_key()
+        if not api_key:
+            return False
+        self._existing_names = tuple(name for name, _ in existing_characters)
+        worker = ChatWorker(
+            self._create_text_service(api_key),
+            MODEL_CHAT,
+            (),
+            character_discovery_request(
+                existing_characters,
+                user_name=user_name,
+                user_persona=user_persona,
+            ),
+            system_prompt=CHARACTER_DISCOVERY_SYSTEM_PROMPT,
+            temperature=1.1,
+        )
+        worker.completed.connect(self._completed)
+        worker.failed.connect(self._failed)
+        worker.cancelled.connect(self._failed)
+        self._worker = worker
+        self._thread = launch_worker(
+            self, worker, thread_finished=self._finished
+        )
+        return True
+
+    def _completed(self, text: str) -> None:
+        if self._shutting_down:
+            return
+        try:
+            card = parse_discovered_character(
+                text, existing_names=self._existing_names
+            )
+        except CharacterCardError:
+            self._on_error("invalid_character_card")
+            return
+        self._on_generated(card)
+
+    def _failed(self, error_code: str = "") -> None:
+        if not self._shutting_down:
+            self._on_error(error_code or "character_generation_failed")
+
+    def _finished(self) -> None:
+        self._worker, self._thread = dispose_worker(
+            self._worker, self._thread
+        )
+        self._existing_names = ()
+
+    def shutdown(self) -> None:
+        self._shutting_down = True
         if self._worker is not None:
             self._worker.cancel()
         if self._thread is not None:

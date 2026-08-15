@@ -214,6 +214,7 @@ class SettingsPage(QWidget):
     text_settings_changed = Signal()
     tts_settings_changed = Signal()
     proactive_settings_changed = Signal()
+    character_discovery_settings_changed = Signal()
     notification_sound_preview_requested = Signal()
 
     def __init__(
@@ -1175,6 +1176,77 @@ class SettingsPage(QWidget):
         roleplay_form.addRow("", roleplay_note)
         layout.addWidget(roleplay)
 
+        discovery = QGroupBox("新角色发现")
+        discovery_form = QFormLayout(discovery)
+        configure_mobile_form(discovery_form)
+        discovery_form.setSpacing(12)
+        self.character_discovery_enabled = QCheckBox(
+            "在随机时间生成新角色，并让对方作为新联系人发来第一条消息"
+        )
+        self.character_discovery_enabled.setChecked(
+            settings.get("character_discovery_enabled", "false").lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.character_discovery_enabled.toggled.connect(
+            self._save_character_discovery_settings
+        )
+        discovery_form.addRow("自动发现", self.character_discovery_enabled)
+
+        discovery_interval_row = responsive_row_layout()
+        self.character_discovery_min_minutes = QSpinBox()
+        self.character_discovery_min_minutes.setRange(15, 10_080)
+        self.character_discovery_min_minutes.setSuffix(" 分钟")
+        self.character_discovery_min_minutes.setValue(
+            self._bounded_integer_setting(
+                "character_discovery_min_minutes", 180, 15, 10_080
+            )
+        )
+        self.character_discovery_max_minutes = QSpinBox()
+        self.character_discovery_max_minutes.setRange(15, 10_080)
+        self.character_discovery_max_minutes.setSuffix(" 分钟")
+        self.character_discovery_max_minutes.setValue(
+            max(
+                self.character_discovery_min_minutes.value(),
+                self._bounded_integer_setting(
+                    "character_discovery_max_minutes", 720, 15, 10_080
+                ),
+            )
+        )
+        discovery_interval_row.addWidget(self.character_discovery_min_minutes)
+        discovery_interval_row.addWidget(QLabel("至"))
+        discovery_interval_row.addWidget(self.character_discovery_max_minutes)
+        discovery_interval_row.addStretch(1)
+        discovery_form.addRow("随机间隔", discovery_interval_row)
+        self.character_discovery_min_minutes.valueChanged.connect(
+            self._save_character_discovery_settings
+        )
+        self.character_discovery_max_minutes.valueChanged.connect(
+            self._save_character_discovery_settings
+        )
+
+        self.character_discovery_daily_limit = QSpinBox()
+        self.character_discovery_daily_limit.setRange(1, 10)
+        self.character_discovery_daily_limit.setSuffix(" 位/天")
+        self.character_discovery_daily_limit.setValue(
+            self._bounded_integer_setting(
+                "character_discovery_daily_limit", 1, 1, 10
+            )
+        )
+        self.character_discovery_daily_limit.valueChanged.connect(
+            self._save_character_discovery_settings
+        )
+        discovery_form.addRow("每日上限", self.character_discovery_daily_limit)
+        discovery_note = QLabel(
+            "仅在软件运行时计时。每次生成会调用当前文本平台；成功后角色卡写入本机，"
+            "并创建一条新联系人会话。生成失败、重名或当日达到上限时不会新增角色，"
+            "也不会占用成功名额。自动生成的角色可照常编辑或删除。"
+        )
+        discovery_note.setWordWrap(True)
+        discovery_note.setProperty("muted", True)
+        discovery_form.addRow("", discovery_note)
+        self._update_character_discovery_controls()
+        layout.addWidget(discovery)
+
         appearance = QGroupBox("聊天与外观")
         appearance_form = QFormLayout(appearance)
         configure_mobile_form(appearance_form)
@@ -1283,6 +1355,8 @@ class SettingsPage(QWidget):
             "本机保存的场景、关系、共同记忆和未完事件状态；"
             "启用主动消息后，角色会在随机间隔再次调用当前文本平台，并结合设备"
             "当前本地日期、星期、时区和时段开启合适话题。"
+            "启用新角色发现后，你填写的称呼、人物简介以及现有角色的名称和简短性格"
+            "会发送到当前文本平台，用于生成不重名的新联系人角色卡；生成结果保存在本机。"
             "启用自动朗读或手动播放时，只会提取 AI 最终回复中角色真正说出口的"
             "台词，并按语音引擎设置发送到 Microsoft Edge 在线语音服务、"
             "科大讯飞或硅基流动；选择 IndexTTS2 时台词只发往本机回环接口。"
@@ -2523,10 +2597,49 @@ class SettingsPage(QWidget):
         self.theme_changed.emit(value)
 
     def _integer_setting(self, key: str, default: int) -> int:
+        return self._bounded_integer_setting(key, default, 5, 1_440)
+
+    def _bounded_integer_setting(
+        self,
+        key: str,
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
         try:
-            return max(5, min(int(self._settings.get(key, str(default))), 1_440))
+            return max(
+                minimum,
+                min(int(self._settings.get(key, str(default))), maximum),
+            )
         except ValueError:
             return default
+
+    def _update_character_discovery_controls(self) -> None:
+        enabled = self.character_discovery_enabled.isChecked()
+        self.character_discovery_min_minutes.setEnabled(enabled)
+        self.character_discovery_max_minutes.setEnabled(enabled)
+        self.character_discovery_daily_limit.setEnabled(enabled)
+
+    def _save_character_discovery_settings(self, *_args) -> None:
+        minimum = self.character_discovery_min_minutes.value()
+        maximum = self.character_discovery_max_minutes.value()
+        if maximum < minimum:
+            self.character_discovery_max_minutes.blockSignals(True)
+            self.character_discovery_max_minutes.setValue(minimum)
+            self.character_discovery_max_minutes.blockSignals(False)
+            maximum = minimum
+        self._settings.set(
+            "character_discovery_enabled",
+            "true" if self.character_discovery_enabled.isChecked() else "false",
+        )
+        self._settings.set("character_discovery_min_minutes", str(minimum))
+        self._settings.set("character_discovery_max_minutes", str(maximum))
+        self._settings.set(
+            "character_discovery_daily_limit",
+            str(self.character_discovery_daily_limit.value()),
+        )
+        self._update_character_discovery_controls()
+        self.character_discovery_settings_changed.emit()
 
     def _save_proactive_settings(self, *_args) -> None:
         minimum = self.proactive_min_minutes.value()

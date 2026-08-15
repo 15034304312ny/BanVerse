@@ -11,6 +11,7 @@ from datetime import datetime
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from ..character_cards import CharacterCardError, empty_card, normalize_card
 from ..gateway import Message
 from ..time_context import local_time_context
 from .data.repositories import SettingsRepository
@@ -55,6 +56,18 @@ OPENING_SYSTEM_SUFFIX = """## 首次开场
 不要引用不存在的“上次对话”“之前约定”或固定开场白，也不要复述角色介绍。
 只发送一条可直接给用户看的角色消息；不要提及系统指令、AI、模型或“首次开场”。
 长度以 1 至 3 个短段落为宜，保持角色自己的说话习惯。"""
+
+CHARACTER_DISCOVERY_SYSTEM_PROMPT = """你是 BanVerse 的原创 Character Card V2 编剧。
+每次创作一位可长期聊天、性格鲜明且与现有角色明显不同的虚构成年角色。角色可以来自
+现代都市、历史、奇幻、科幻或其他适合长期互动的背景，但不能照搬现实人物、知名作品角色
+或受版权保护的角色。不得生成未成年人，也不得让角色用危险、威胁、紧急事件或情感勒索
+强迫用户回复。
+
+只输出一行严格 JSON，不要 Markdown、注释、解释或额外字段：
+{"name":"中文名","description":"成年外貌、职业与背景","personality":"性格、偏好、缺点、说话习惯与边界","scenario":"生活环境与相遇方式","first_mes":"刚添加用户后的首条消息","alternate_greetings":["备用开场1","备用开场2"],"mes_example":"至少两轮示例对话","creator_notes":"简短创作说明","tags":["题材","性格","身份"]}
+
+所有字段使用简体中文。first_mes 应让用户容易回应，但不要复述整张角色介绍。角色之间的
+职业、人生目标、情绪表达、关系节奏和语言习惯要有实质差异，不能只是换名字。"""
 
 AUTONOMOUS_IMAGE_SYSTEM_PROMPT = """你是“虚构角色自主分享图片”的决策器，不与用户对话。
 判断角色刚发出的消息是否处在自然、值得附带一张图片的时机。
@@ -537,6 +550,134 @@ def _sanitize_role_state(value) -> dict:
     return result
 
 
+def character_discovery_request(
+    existing_characters: Sequence[tuple[str, str]],
+    *,
+    user_name: str = "用户",
+    user_persona: str = "",
+    current_time: datetime | None = None,
+) -> str:
+    """构造新联系人角色卡请求，并提供有限的去重上下文。"""
+
+    existing = []
+    for name, personality in existing_characters[:50]:
+        clean_name = " ".join(str(name).split()).strip()[:40]
+        clean_personality = " ".join(str(personality).split()).strip()[:160]
+        if clean_name:
+            existing.append(
+                f"- {clean_name}：{clean_personality or '未填写性格'}"
+            )
+    existing_text = "\n".join(existing) or "（当前没有角色）"
+    clean_user_name = " ".join(str(user_name).split()).strip()[:32] or "用户"
+    clean_persona = " ".join(str(user_persona).split()).strip()[:1_500]
+    context = local_time_context(current_time)
+    return (
+        "请生成一位会主动添加用户并自然发来首条消息的新角色。\n"
+        f"用户称呼：{clean_user_name}\n"
+        f"用户自述：{clean_persona or '（未提供，不要臆测）'}\n"
+        f"{context.prompt_text}\n\n"
+        "现有角色（新角色不得重名或只做表面改写）：\n"
+        f"{existing_text}\n\n"
+        "请按系统指定的严格 JSON 结构返回完整角色卡素材。"
+    )
+
+
+def parse_discovered_character(
+    text: str,
+    *,
+    existing_names: Sequence[str] = (),
+) -> dict:
+    """把模型结果收敛为受控的 Character Card V2，拒绝重名和指令注入字段。"""
+
+    value = text.strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value)
+    match = re.search(r"\{.*\}", value, flags=re.DOTALL)
+    if match is None:
+        raise CharacterCardError("新角色响应不是有效 JSON。")
+    try:
+        payload = json.loads(match.group(0))
+    except (TypeError, ValueError) as exc:
+        raise CharacterCardError("新角色响应不是有效 JSON。") from exc
+    if not isinstance(payload, dict):
+        raise CharacterCardError("新角色响应必须是 JSON 对象。")
+
+    def text_field(
+        key: str,
+        *,
+        limit: int,
+        minimum: int = 1,
+    ) -> str:
+        raw = payload.get(key)
+        if not isinstance(raw, str):
+            raise CharacterCardError(f"新角色字段 {key} 必须是文本。")
+        cleaned = raw.strip()[:limit]
+        if len(cleaned) < minimum:
+            raise CharacterCardError(f"新角色字段 {key} 内容不足。")
+        return cleaned
+
+    name = " ".join(text_field("name", limit=32).split()).strip()
+    name_key = re.sub(r"\s+", "", name).casefold()
+    known = {
+        re.sub(r"\s+", "", str(item)).casefold()
+        for item in existing_names
+        if str(item).strip()
+    }
+    if not name_key or name_key in known:
+        raise CharacterCardError("新角色与现有角色重名。")
+
+    card = empty_card(name)
+    data = card["data"]
+    data["description"] = text_field(
+        "description", limit=2_000, minimum=12
+    )
+    data["personality"] = text_field(
+        "personality", limit=2_000, minimum=12
+    )
+    data["scenario"] = text_field("scenario", limit=1_500, minimum=8)
+    data["first_mes"] = text_field("first_mes", limit=1_500, minimum=4)
+    data["mes_example"] = text_field(
+        "mes_example", limit=4_000, minimum=8
+    )
+    creator_notes = payload.get("creator_notes", "")
+    if isinstance(creator_notes, str):
+        data["creator_notes"] = creator_notes.strip()[:800]
+
+    greetings = payload.get("alternate_greetings", [])
+    if isinstance(greetings, list):
+        data["alternate_greetings"] = [
+            item.strip()[:1_000]
+            for item in greetings[:3]
+            if isinstance(item, str) and item.strip()
+        ]
+    tags = payload.get("tags", [])
+    if isinstance(tags, list):
+        data["tags"] = [
+            " ".join(item.split()).strip()[:32]
+            for item in tags[:8]
+            if isinstance(item, str) and item.strip()
+        ]
+
+    # 模型输出不能直接成为后续会话的高优先级指令。
+    data["system_prompt"] = (
+        f"始终以{name}的身份自然交流，保持独立人格与生活连续性。"
+        "尊重用户明确表达的边界，不虚构共同经历，不以危险或情感勒索迫使用户回应。"
+    )
+    data["post_history_instructions"] = (
+        "以当前对话中用户最新表达为准；关系发展应循序渐进，允许用户拒绝、暂停或改变话题。"
+    )
+    data["creator"] = "BanVerse AI"
+    data["character_version"] = "1.0"
+    data["extensions"] = {
+        "deepseek_chat": {
+            "generated": True,
+            "source": "character_discovery",
+        }
+    }
+    return normalize_card(card)
+
+
 def proactive_request(
     character_name: str,
     *,
@@ -687,3 +828,104 @@ class ProactiveMessageScheduler(QObject):
     def _on_timeout(self) -> None:
         self.schedule_next()
         self.due.emit()
+
+
+class CharacterDiscoveryScheduler(QObject):
+    """按独立随机间隔触发新联系人生成，并持久化每日成功上限。"""
+
+    due = Signal()
+
+    def __init__(
+        self,
+        settings: SettingsRepository,
+        parent: QObject | None = None,
+        *,
+        randint: Callable[[int, int], int] = random.randint,
+    ) -> None:
+        super().__init__(parent)
+        self._settings = settings
+        self._randint = randint
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._on_timeout)
+        self._next_delay_ms: int | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._settings.get_bool("character_discovery_enabled", False)
+
+    @property
+    def next_delay_ms(self) -> int | None:
+        return self._next_delay_ms
+
+    def start(self) -> None:
+        self.schedule_next()
+
+    def reload(self) -> None:
+        self.schedule_next()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self._next_delay_ms = None
+
+    def schedule_next(self) -> None:
+        self._timer.stop()
+        self._next_delay_ms = None
+        if not self.enabled:
+            return
+        minimum, maximum = self._interval_bounds()
+        self._next_delay_ms = self._randint(minimum, maximum) * 60_000
+        self._timer.start(self._next_delay_ms)
+
+    def quota_available(self, current_time: datetime | None = None) -> bool:
+        today = (current_time or datetime.now().astimezone()).date().isoformat()
+        if self._settings.get("character_discovery_count_day") != today:
+            return True
+        try:
+            count = int(self._settings.get("character_discovery_count", "0"))
+        except ValueError:
+            count = 0
+        return max(0, count) < self._daily_limit()
+
+    def record_generated(self, current_time: datetime | None = None) -> None:
+        today = (current_time or datetime.now().astimezone()).date().isoformat()
+        if self._settings.get("character_discovery_count_day") == today:
+            try:
+                count = max(
+                    0,
+                    int(self._settings.get("character_discovery_count", "0")),
+                )
+            except ValueError:
+                count = 0
+        else:
+            count = 0
+        self._settings.set("character_discovery_count_day", today)
+        self._settings.set("character_discovery_count", str(count + 1))
+
+    def _interval_bounds(self) -> tuple[int, int]:
+        try:
+            minimum = int(
+                self._settings.get("character_discovery_min_minutes", "180")
+            )
+            maximum = int(
+                self._settings.get("character_discovery_max_minutes", "720")
+            )
+        except ValueError:
+            return 180, 720
+        minimum = max(15, min(minimum, 10_080))
+        maximum = max(minimum, min(maximum, 10_080))
+        return minimum, maximum
+
+    def _daily_limit(self) -> int:
+        try:
+            value = int(
+                self._settings.get("character_discovery_daily_limit", "1")
+            )
+        except ValueError:
+            value = 1
+        return max(1, min(value, 10))
+
+    def _on_timeout(self) -> None:
+        self.schedule_next()
+        if self.quota_available():
+            self.due.emit()

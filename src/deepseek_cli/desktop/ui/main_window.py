@@ -37,6 +37,7 @@ from ...tts import TtsProfile, read_tts_profile
 from ..ai_features import (
     OPENING_SYSTEM_SUFFIX,
     PROACTIVE_SYSTEM_SUFFIX,
+    CharacterDiscoveryScheduler,
     ProactiveMessageScheduler,
     classify_role_reply,
     enrich_role_image_prompt,
@@ -46,7 +47,11 @@ from ..ai_features import (
     serialize_reply_segments,
 )
 from ..assets import AvatarError, import_chat_image
-from ..background import AutonomousImageRunner, SummaryRunner
+from ..background import (
+    AutonomousImageRunner,
+    CharacterDiscoveryRunner,
+    SummaryRunner,
+)
 from ..builtin_characters import BuiltinCharacterManager
 from ..data.repositories import (
     CharacterRepository,
@@ -110,7 +115,9 @@ class MainWindow(QMainWindow):
         self._pending_opening_conversation_id: str | None = None
         self._opening_fallbacks: dict[str, str] = {}
         self._proactive = ProactiveMessageScheduler(settings, self)
+        self._character_discovery = CharacterDiscoveryScheduler(settings, self)
         self._summary_runner: SummaryRunner | None = None
+        self._character_discovery_runner: CharacterDiscoveryRunner | None = None
         self._image_runner: AutonomousImageRunner | None = None
         self._flow: MessageFlowController | None = None
         self._active_delivery: ReplyDelivery | None = None
@@ -238,10 +245,14 @@ class MainWindow(QMainWindow):
         self.settings_page.proactive_settings_changed.connect(
             self._proactive.reload
         )
+        self.settings_page.character_discovery_settings_changed.connect(
+            self._character_discovery.reload
+        )
         self.settings_page.notification_sound_preview_requested.connect(
             lambda: self._play_notification(force=True)
         )
         self._proactive.due.connect(self._send_proactive_message)
+        self._character_discovery.due.connect(self._generate_random_character)
         self.set_audio_services(
             speech=speech,
             notification_sound=notification_sound,
@@ -266,6 +277,13 @@ class MainWindow(QMainWindow):
             refresh=lambda: self.conversations.refresh(
                 select_id=self._conversation_id
             ),
+            parent=self,
+        )
+        self._character_discovery_runner = CharacterDiscoveryRunner(
+            create_text_service=self._create_text_service,
+            text_api_key=self._text_api_key,
+            on_generated=self._on_random_character_generated,
+            on_error=self._on_random_character_error,
             parent=self,
         )
         self._image_runner = AutonomousImageRunner(
@@ -302,6 +320,7 @@ class MainWindow(QMainWindow):
         self._flow.delivery_notification.connect(self._play_notification)
         self._flow.delivery_finished.connect(self._on_delivery_finished)
         self._proactive.start()
+        self._character_discovery.start()
         self._enqueue_pending_summaries()
 
     @property
@@ -315,6 +334,13 @@ class MainWindow(QMainWindow):
         """后台发图线程（测试等待其空闲时读取）。"""
 
         return self._image_runner.thread if self._image_runner else None
+
+    @property
+    def _character_discovery_thread(self) -> QThread | None:
+        """随机新角色后台线程（测试等待其空闲时读取）。"""
+
+        runner = self._character_discovery_runner
+        return runner.thread if runner else None
 
     @property
     def _thread(self) -> QThread | None:
@@ -959,6 +985,74 @@ class MainWindow(QMainWindow):
         if delivery.request_kind == "proactive" and not self.isActiveWindow():
             QApplication.alert(self, 5_000)
 
+    def _generate_random_character(self) -> None:
+        """随机时刻请求一位新角色；成功前不修改联系人或消耗每日名额。"""
+
+        runner = self._character_discovery_runner
+        if (
+            self._shutting_down
+            or runner is None
+            or runner.busy
+            or not self._character_discovery.enabled
+            or not self._character_discovery.quota_available()
+        ):
+            return
+        profiles = tuple(
+            (
+                character.name,
+                str(character.card.get("data", {}).get("personality", "")),
+            )
+            for character in self._characters.list()
+        )
+        runner.generate(
+            profiles,
+            user_name=self._settings.get("user_name", "用户"),
+            user_persona=self._settings.get("user_persona", ""),
+        )
+
+    def _on_random_character_generated(self, card: dict) -> None:
+        """保存新角色，并以其首条消息建立一个不抢占当前界面的联系人会话。"""
+
+        if self._shutting_down:
+            return
+        name = str(card.get("data", {}).get("name", "")).strip()
+        name_key = "".join(name.split()).casefold()
+        if not name_key or any(
+            "".join(item.name.split()).casefold() == name_key
+            for item in self._characters.list()
+        ):
+            self._on_random_character_error("duplicate_character")
+            return
+        character = self._characters.create(card)
+        opening = str(character.card["data"].get("first_mes", "")).strip()
+        model = (
+            self._settings.get("default_model")
+            or self.settings_page.default_model.currentData()
+        )
+        self._chats.create_conversation(
+            model,
+            title=character.name,
+            character_id=character.id,
+            opening_message=opening,
+        )
+        self._character_discovery.record_generated()
+        self._settings.set("character_discovery_last_error", "")
+        self._settings.set("character_discovery_last_name", character.name)
+        self.characters_page.refresh()
+        self.conversations.refresh(select_id=self._conversation_id)
+        self._play_notification()
+        if not self.isActiveWindow():
+            QApplication.alert(self, 5_000)
+
+    def _on_random_character_error(self, error_code: str) -> None:
+        """静默记录后台失败；下一随机周期可重试且不占每日名额。"""
+
+        if not self._shutting_down:
+            self._settings.set(
+                "character_discovery_last_error",
+                str(error_code or "character_generation_failed")[:120],
+            )
+
     def _send_proactive_message(self) -> None:
         """让当前角色会话在随机计时到期后主动开启话题。"""
 
@@ -1257,6 +1351,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         self._shutting_down = True
         self._proactive.stop()
+        self._character_discovery.stop()
         self.settings_page.shutdown_model_refresh()
         if self._notification_sound is not None:
             self._notification_sound.shutdown()
@@ -1266,6 +1361,8 @@ class MainWindow(QMainWindow):
             self._flow.shutdown()
         if self._summary_runner is not None:
             self._summary_runner.shutdown()
+        if self._character_discovery_runner is not None:
+            self._character_discovery_runner.shutdown()
         if self._image_runner is not None:
             self._image_runner.shutdown()
         event.accept()
