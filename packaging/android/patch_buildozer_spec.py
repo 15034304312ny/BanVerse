@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import configparser
-import re
+import runpy
 from pathlib import Path
 
 
-# 版本唯一权威来源是 pyproject.toml；buildozer.spec 的 version 从这里读取，
-# 避免硬编码导致 Android 产物版本漂移（见 packaging/check_version_consistency.py）。
+# 版本唯一权威来源是 ``src/deepseek_cli/_version.py``；正常构建由
+# build_android.sh 显式传入，直接调用脚本时才从项目根读取。
 def _project_root(path: Path) -> Path:
     """从任意文件向上定位包含 pyproject.toml 的项目根。"""
 
@@ -20,14 +20,12 @@ def _project_root(path: Path) -> Path:
 
 
 def _project_version(root: Path) -> str:
-    match = re.search(
-        r'^version = "([^"]+)"',
-        (root / "pyproject.toml").read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-    if not match:
-        raise SystemExit("pyproject.toml 中缺少 version 定义")
-    return match.group(1)
+    reader_path = root / "packaging" / "read_project_version.py"
+    if not reader_path.is_file():
+        raise SystemExit(f"找不到版本读取器：{reader_path}")
+    reader = runpy.run_path(str(reader_path))
+    return reader["project_version"](root)
+
 
 REQUIRED_EXTENSIONS = {
     "py",
@@ -81,6 +79,7 @@ def _order_qt_libraries(extra_args: str) -> str:
 def patch_buildozer_spec(
     path: Path,
     *,
+    app_version: str | None = None,
     p4a_source_dir: Path | None = None,
     build_dir: Path | None = None,
     p4a_commit: str | None = None,
@@ -115,8 +114,10 @@ def patch_buildozer_spec(
     config.set("app", "title", "伴界 BanVerse")
     config.set("app", "package.name", "deepseekchat")
     config.set("app", "package.domain", "app.deepseekchat")
-    project_root = _project_root(path)
-    config.set("app", "version", _project_version(project_root))
+    if not app_version:
+        project_root = _project_root(path)
+        app_version = _project_version(project_root)
+    config.set("app", "version", app_version)
     requirements = _comma_values(
         config.get("app", "requirements", fallback="")
     )
@@ -164,12 +165,14 @@ def patch_buildozer_spec(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("spec", type=Path)
+    parser.add_argument("--app-version")
     parser.add_argument("--p4a-source-dir", type=Path)
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--p4a-commit")
     arguments = parser.parse_args()
     patch_buildozer_spec(
         arguments.spec,
+        app_version=arguments.app_version,
         p4a_source_dir=arguments.p4a_source_dir,
         build_dir=arguments.build_dir,
         p4a_commit=arguments.p4a_commit,

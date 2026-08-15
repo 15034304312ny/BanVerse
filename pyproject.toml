@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deepseek-dialog-cli"
-version = "1.0.0"
+dynamic = ["version"]
 description = "伴界 BanVerse：支持多平台文本、图片与语音的角色聊天应用"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,9 @@ banverse = "deepseek_cli.desktop.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "deepseek_cli._version.__version__"}
 
 [tool.setuptools.package-data]
 "deepseek_cli.desktop" = [

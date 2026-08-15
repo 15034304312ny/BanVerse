@@ -35,11 +35,13 @@ from ...grsai_gateway import (
 from ...model_catalog import MODEL_CHAT, text_provider_models
 from ...tts import TtsProfile, read_tts_profile
 from ..ai_features import (
+    OPENING_SYSTEM_SUFFIX,
     PROACTIVE_SYSTEM_SUFFIX,
     ProactiveMessageScheduler,
     classify_role_reply,
     enrich_role_image_prompt,
     explicit_image_request_prompt,
+    opening_request,
     proactive_request,
     serialize_reply_segments,
 )
@@ -399,7 +401,9 @@ class MainWindow(QMainWindow):
         conversation = self._chats.create_conversation(model)
         self.conversations.refresh(select_id=conversation.id)
         self._show_messages()
-        self.conversations.select(conversation.id)
+        # refresh 为避免重复加载会屏蔽列表选择信号；必须显式打开新会话，
+        # 否则列表虽然选中，聊天页仍可能停留在旧会话。
+        self._open_conversation(conversation.id)
 
     def _new_character_conversation(self, character_id: str) -> None:
         character = self._characters.get(character_id)
@@ -434,7 +438,7 @@ class MainWindow(QMainWindow):
         self._opening_fallbacks[conversation.id] = opening
         self.conversations.refresh(select_id=conversation.id)
         self._show_messages()
-        self.conversations.select(conversation.id)
+        self._open_conversation(conversation.id)
         self._send_ai_opening(conversation, opening)
 
     def _characters_changed(self) -> None:
@@ -875,6 +879,9 @@ class MainWindow(QMainWindow):
                 ):
                     QApplication.alert(self, 5_000)
             return
+        # 失败/取消没有投递计划时也必须先把等待气泡从布局中移除；仅调用
+        # finish_stream 会丢失引用但留下空白气泡，开场模板因此不能立即显示。
+        self.chat_page.discard_stream()
         self.chat_page.finish_stream()
         if request_kind == "opening":
             # 开场请求失败：回退到角色模板开场白，保证新会话有内容可看。
@@ -1037,9 +1044,9 @@ class MainWindow(QMainWindow):
             self._recover_opening(conversation.id, fallback_opening)
             return
 
-        history = self._chats.completed_history(
-            conversation.id, max_turns=16
-        )
+        # 模板开场白只用于失败兜底，绝不能作为已经发生的 assistant 历史
+        # 传给模型；否则模型会误以为自己已经开过场并引用不存在的上下文。
+        history = ()
         current_time = datetime.now().astimezone()
         character_prompt = build_character_prompt(
             character.card,
@@ -1060,7 +1067,7 @@ class MainWindow(QMainWindow):
             part
             for part in (
                 character_prompt.system,
-                PROACTIVE_SYSTEM_SUFFIX,
+                OPENING_SYSTEM_SUFFIX,
             )
             if part.strip()
         )
@@ -1068,7 +1075,7 @@ class MainWindow(QMainWindow):
             service=self._create_text_service(api_key),
             model=conversation.model,
             history=history,
-            request_text=proactive_request(
+            request_text=opening_request(
                 character.name, current_time=current_time
             ),
             system_prompt=system_prompt,

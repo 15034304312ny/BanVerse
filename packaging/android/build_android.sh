@@ -5,7 +5,6 @@ PYSIDE_VERSION="6.11.1"
 WEBSOCKET_VERSION="1.9.0"
 CERTIFI_VERSION="2026.7.22"
 NDK_VERSION="28.2.13676358"
-APP_VERSION="1.0.0"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 BUILD_ROOT="${PROJECT_ROOT}/build/android"
@@ -27,6 +26,7 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "找不到 ${PYTHON_BIN}。PySide6 ${PYSIDE_VERSION} Android wheel 需要 CPython 3.11。" >&2
     exit 2
 fi
+APP_VERSION="$("${PYTHON_BIN}" "${PROJECT_ROOT}/packaging/read_project_version.py")"
 if ! command -v java >/dev/null 2>&1; then
     echo "找不到 Java。请先安装 JDK 21 或更高版本。" >&2
     exit 2
@@ -42,9 +42,16 @@ if ! command -v curl >/dev/null 2>&1; then
     exit 2
 fi
 if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/../check_version_consistency.py" >/dev/null 2>&1; then
-    echo "版本号不一致：pyproject.toml、branding.py 与 build_android.sh 中的版本号必须保持一致。" >&2
+    echo "发布元数据配置不一致，Android 构建已停止。" >&2
     "${PYTHON_BIN}" "${SCRIPT_DIR}/../check_version_consistency.py" || true
     exit 2
+fi
+if [[ "${BANVERSE_DEVELOPMENT_BUILD:-0}" != "1" ]]; then
+    if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/../check_release_source.py"; then
+        echo "Android 正式构建必须来自干净且已标记版本标签的提交。" >&2
+        echo "仅本地调试可设置 BANVERSE_DEVELOPMENT_BUILD=1 跳过。" >&2
+        exit 2
+    fi
 fi
 if [[ -n "${ANDROID_BUILD_PROXY_HOST:-}" \
     && -n "${ANDROID_BUILD_PROXY_PORT:-}" ]]; then
@@ -177,6 +184,7 @@ if [[ "${ANDROID_GRADLE_MIRROR:-0}" == "1" ]]; then
 fi
 PATCH_ARGUMENTS=(
     "${STAGE_DIR}/buildozer.spec"
+    --app-version "${APP_VERSION}"
     --build-dir "${ANDROID_BUILD_CACHE}"
     --p4a-commit "${P4A_COMMIT}"
 )

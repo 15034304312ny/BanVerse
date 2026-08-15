@@ -126,6 +126,8 @@ class FeatureGateway:
             yield StreamDelta(content="AI 摘要：双方继续讨论未完成的调查")
         elif "自主分享图片" in system_prompt:
             yield StreamDelta(content='{"send_image":false,"prompt":""}')
+        elif "## 首次开场" in system_prompt:
+            yield StreamDelta(content="晚上好。刚路过一家亮着暖灯的小店，你今天过得怎么样？")
         elif "## 主动消息" in system_prompt:
             yield StreamDelta(content="夜色不错。上次的线索，你还想继续查吗？")
         else:
@@ -466,12 +468,27 @@ def test_new_character_conversation_ai_opening_clears_template(
     card["data"]["first_mes"] = "模板开场白"
     card["data"]["description"] = "会主动开场测试角色。"
     character = characters.create(card)
+    calls = []
+
+    class RecordingGateway(FeatureGateway):
+        def stream_chat(
+            self, model, messages, *, system_prompt="", temperature=None
+        ):
+            calls.append((list(messages), system_prompt))
+            yield from super().stream_chat(
+                model,
+                messages,
+                system_prompt=system_prompt,
+                temperature=temperature,
+            )
+
+    gateway = RecordingGateway()
     window = MainWindow(
         chats,
         characters,
         settings,
         FakeCredentials(),
-        gateway_factory=lambda _key: FeatureGateway(),
+        gateway_factory=lambda _key: gateway,
     )
     qtbot.addWidget(window)
 
@@ -479,6 +496,8 @@ def test_new_character_conversation_ai_opening_clears_template(
     conversation_id = database.connection.execute(
         "SELECT id FROM conversations ORDER BY rowid DESC LIMIT 1"
     ).fetchone()[0]
+    assert window._conversation_id == conversation_id
+    assert window.chat_page.conversation_id == conversation_id
 
     # 等待 AI 开场请求完成（proactive turn 落库）
     qtbot.waitUntil(
@@ -488,7 +507,15 @@ def test_new_character_conversation_ai_opening_clears_template(
     )
     turn = chats.list_turns(conversation_id)[-1]
     assert turn.origin == "proactive"
-    assert turn.assistant_content.startswith("夜色不错")
+    assert turn.assistant_content.startswith("晚上好")
+    opening_calls = [
+        messages for messages, prompt in calls if "## 首次开场" in prompt
+    ]
+    assert len(opening_calls) == 1
+    assert [message.role for message in opening_calls[0]] == ["user"]
+    assert all(
+        "模板开场白" not in message.content for message in opening_calls[0]
+    )
     # 模板被清空，后续历史不再重复注入模板
     assert chats.get_conversation(conversation_id).opening_message == ""
     assert [m.role for m in chats.completed_history(conversation_id)] == [
@@ -532,6 +559,67 @@ def test_ai_opening_without_api_key_falls_back_to_template(
         "模板开场白"
     )
     assert len(chats.list_turns(conversation_id)) == 0
+    assert window.chat_page._message_bubbles()[0].text_label.text() == (
+        "模板开场白"
+    )
+    window.close()
+    database.close()
+
+
+def test_ai_opening_failure_falls_back_without_failed_bubble(
+    tmp_path, qtbot
+):
+    """首次开场请求失败时删除临时轮次，并显示角色模板兜底。"""
+
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    card = empty_card("开场失败角色")
+    card["data"]["first_mes"] = "失败后的模板开场白"
+    character = characters.create(card)
+
+    class FailingOpeningGateway(FeatureGateway):
+        def stream_chat(
+            self, model, messages, *, system_prompt="", temperature=None
+        ):
+            if "## 首次开场" in system_prompt:
+                raise RuntimeError("opening unavailable")
+            yield from super().stream_chat(
+                model,
+                messages,
+                system_prompt=system_prompt,
+                temperature=temperature,
+            )
+
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: FailingOpeningGateway(),
+    )
+    qtbot.addWidget(window)
+
+    window._new_character_conversation(character.id)
+    conversation_id = database.connection.execute(
+        "SELECT id FROM conversations ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()[0]
+    qtbot.waitUntil(lambda: window._thread is None, timeout=5_000)
+
+    conversation = chats.get_conversation(conversation_id)
+    assert conversation is not None
+    assert conversation.opening_message == "失败后的模板开场白"
+    assert chats.list_turns(conversation_id) == []
+    qtbot.waitUntil(
+        lambda: bool(window.chat_page._message_bubbles())
+        and window.chat_page._message_bubbles()[0].text_label.text()
+        == "失败后的模板开场白",
+        timeout=2_000,
+    )
+    bubbles = window.chat_page._message_bubbles()
+    assert len(bubbles) == 1
+    assert bubbles[0].text_label.text() == "失败后的模板开场白"
     window.close()
     database.close()
 

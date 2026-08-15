@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import runpy
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 project_root = Path(SPECPATH).parent
 source_root = project_root / "src"
+version_reader = runpy.run_path(
+    str(project_root / "packaging" / "read_project_version.py")
+)
+app_version = version_reader["project_version"](project_root)
 launcher = project_root / "packaging" / "deepseek_app_launcher.py"
 app_icon = project_root / "packaging" / "app_icon.ico"
 app_resources = source_root / "deepseek_cli" / "desktop" / "resources"
@@ -44,7 +49,7 @@ exe = EXE(
     analysis.binaries,
     analysis.datas,
     [],
-    name="BanVerse-1.0.0",
+    name=f"BanVerse-{app_version}",
     icon=str(app_icon),
     debug=False,
     bootloader_ignore_signals=False,

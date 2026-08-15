@@ -6,7 +6,7 @@
 - `deepseek-app`：PySide6 开发的聊天应用；Windows 使用三栏布局，
   Android 使用单列页面和底部导航。
 
-图形版支持会话列表、本地历史、后台流式生成与真人式分段投递、折叠显示思考过程、停止与重试、内置表情包、发送与预览图片、AI 图片理解、角色自主生成并分享图片、AI 消息提示音、会话级模型切换、AI 会话摘要、角色随机主动消息、浅色/深色主题和本地凭据存储。界面仅借鉴常见聊天软件的交互习惯，不使用第三方聊天软件的商标或官方素材。
+图形版支持会话列表、本地历史、后台流式生成与真人式分段投递、折叠显示思考过程、停止与重试、内置表情包、发送与预览图片、AI 图片理解、角色自主生成并分享图片、AI 消息提示音、会话级模型切换、AI 会话摘要、角色随机主动消息、新角色会话 AI 动态开场、浅色/深色主题和本地凭据存储。界面仅借鉴常见聊天软件的交互习惯，不使用第三方聊天软件的商标或官方素材。
 
 ## 环境要求
 
@@ -145,42 +145,38 @@ $env:DEEPSEEK_API_KEY = "你的 API Key"
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-## 打包 Windows EXE
+## 打包 Windows 正式版
 
-安装开发依赖后：
-
-```powershell
-.\.venv\Scripts\pyinstaller.exe packaging\deepseek_app.spec
-```
-
-产物为单文件 `dist/BanVerse-1.0.0.exe`。可复制到其他目录并直接双击启动，不需要先打开命令行，也不会显示控制台窗口。API Key 不会被打入产物；用户仍需在首次启动时自行输入。生成图片和用户发送的聊天图片保存在 Qt 应用数据目录下的 `media` 子目录，数据库只记录本地路径。
-
-## 打包 Windows 安装包
-
-需要 Inno Setup 6（`ISCC.exe`）：
+安装开发依赖与 Inno Setup 6 后，使用统一构建入口：
 
 ```powershell
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 ```
 
-产物为 `dist/BanVerse-1.0.0-Setup.exe`：安装到 `Program Files\伴界 BanVerse`，创建开始菜单/桌面快捷方式，支持卸载。
+脚本会从 `src/deepseek_cli/_version.py` 读取唯一版本号，并要求工作区干净且对应的 `v<version>` Git 标签指向当前提交；随后依次执行版本配置校验、Ruff、完整测试、PyInstaller 构建、桌面启动冒烟和 Inno Setup 构建。产物为 `dist/BanVerse-<version>.exe` 与 `dist/BanVerse-<version>-Setup.exe`。
+
+单文件版可复制到其他目录直接启动，不显示控制台窗口。API Key 不会被打入产物；用户仍需在首次启动时自行输入。生成图片和用户发送的聊天图片保存在 Qt 应用数据目录下的 `media` 子目录，数据库只记录本地路径。
+
+安装版默认安装到 `Program Files\伴界 BanVerse`，创建开始菜单/桌面快捷方式并支持覆盖升级。卸载程序只移除应用本体，明确保留聊天数据库、角色、API 配置与媒体文件，避免误删用户数据。
 
 ## 打包 Android APK
 
 Qt 官方的 `pyside6-android-deploy` 目前需要 Linux 或 macOS。Windows
 开发机请先启用 WSL2 Ubuntu；Android 构建固定使用 CPython 3.11、
-JDK 21+、PySide6 6.11.1、SDK 36 和 NDK 27.2：
+JDK 21+、PySide6 6.11.1、SDK 36 和 NDK 28c：
 
 ```bash
 cd "/mnt/d/MyCode/AI Agent/04_机器学习代码开发/DeepSeek对话CLI"
 bash packaging/android/build_android.sh
 ```
 
+Android 正式构建同样要求干净工作区与版本标签；只有本地调试构建可以显式设置 `BANVERSE_DEVELOPMENT_BUILD=1` 跳过该限制。
+
 脚本会创建隔离构建环境、下载 Qt 官方 arm64 Android wheels、校验全部
 角色资源，并生成：
 
 ```text
-dist/android/BanVerse-0.1.12-android16-arm64-v8a-debug.apk
+dist/android/BanVerse-<version>-android16-arm64-v8a-debug.apk
 ```
 
 详细系统依赖、真机验证项和发布签名说明见

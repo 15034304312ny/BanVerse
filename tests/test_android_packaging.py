@@ -1,22 +1,16 @@
 from __future__ import annotations
 
 import importlib.util
-import re
 import struct
 import sys
 import zipfile
 from pathlib import Path
 
+from deepseek_cli._version import __version__ as PROJECT_VERSION
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ANDROID_DIR = PROJECT_ROOT / "packaging" / "android"
 P4A_COMMIT = "0382d27de2f7315ed98e74884bafb30365decdee"
-PROJECT_VERSION = (
-    re.search(
-        r'^version = "([^"]+)"',
-        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
-        re.MULTILINE,
-    )
-).group(1)
 
 
 def _load_prepare_module():
@@ -114,8 +108,9 @@ def test_android_build_script_uses_official_qt_wheels_and_deployer():
     assert '--sdk-path "${SDK_PATH}"' in script
     assert "--init" in script
     assert "patch_buildozer_spec.py" in script
-    app_version = f'APP_VERSION="{PROJECT_VERSION}"'
-    assert app_version in script
+    assert "read_project_version.py" in script
+    assert 'APP_VERSION="$("${PYTHON_BIN}"' in script
+    assert f'APP_VERSION="{PROJECT_VERSION}"' not in script
     assert "BanVerse-${APP_VERSION}-android16-arm64-v8a-debug.apk" in script
     assert "deepseekchat-${APP_VERSION}-arm64-v8a-debug.apk" in script
     assert "reset --hard" not in script
@@ -141,10 +136,6 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
     assert module_spec is not None and module_spec.loader is not None
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
-    # patch_buildozer_spec 从 pyproject.toml 读取版本；临时目录需提供该项目根。
-    (tmp_path / "pyproject.toml").write_text(
-        f'version = "{PROJECT_VERSION}"\n', encoding="utf-8"
-    )
     spec = tmp_path / "buildozer.spec"
     spec.write_text(
         (
@@ -163,6 +154,7 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
 
     module.patch_buildozer_spec(
         spec,
+        app_version=PROJECT_VERSION,
         p4a_source_dir=p4a_source,
         build_dir=build_dir,
         p4a_commit=P4A_COMMIT,

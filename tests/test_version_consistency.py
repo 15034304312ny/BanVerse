@@ -1,13 +1,12 @@
-"""版本号一致性回归测试。
-
-防止 pyproject.toml / branding.py / build_android.sh 三处版本号漂移；
-构建、打包前跑一遍 pytest 即可拦截。
-"""
+"""发布入口复用唯一版本源的回归测试。"""
 
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+
+from deepseek_cli._version import __version__
+from deepseek_cli.branding import PRODUCT_VERSION
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,3 +25,15 @@ def _load_check_module():
 def test_project_version_consistent() -> None:
     check = _load_check_module()
     assert check.version_mismatches(PROJECT_ROOT) == []
+    assert check.project_version(PROJECT_ROOT) == __version__
+    assert __version__ == PRODUCT_VERSION
+
+
+def test_installer_preserves_user_data_and_requires_injected_version() -> None:
+    installer = (PROJECT_ROOT / "packaging" / "installer.iss").read_text(
+        encoding="utf-8"
+    )
+
+    assert "#ifndef MyAppVersion" in installer
+    assert "[UninstallDelete]" not in installer
+    assert "{userappdata}" not in installer

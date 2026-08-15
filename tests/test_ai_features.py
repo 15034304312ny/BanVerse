@@ -8,6 +8,7 @@ from deepseek_cli.desktop.ai_features import (
     deserialize_reply_segments,
     enrich_role_image_prompt,
     explicit_image_request_prompt,
+    opening_request,
     parse_autonomous_image_decision,
     parse_role_postprocess,
     proactive_request,
@@ -40,6 +41,16 @@ def test_proactive_request_names_character_without_exposing_timer():
     assert "2026年7月31日" in text
     assert "12:05" in text
     assert "午饭吃什么" in text
+
+
+def test_opening_request_is_explicitly_first_contact():
+    moment = datetime(2026, 8, 15, 20, 30).astimezone()
+
+    text = opening_request("林小满", current_time=moment)
+
+    assert "林小满" in text
+    assert "全新的会话" in text
+    assert "没有可延续的聊天历史" in text
 
 
 def test_local_time_context_distinguishes_lunch_and_late_night():

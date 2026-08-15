@@ -1,81 +1,127 @@
-"""校验项目各处版本号保持一致，防止发布时版本漂移。
-
-当前版本号出现在三处，且打包产物（EXE/APK）不携带 ``pyproject.toml``，因此
-运行时无法简单地从单一点读取：
-
-- ``pyproject.toml`` 的 ``[project].version``（安装元数据与分发版本）
-- ``src/deepseek_cli/branding.py`` 的 ``PRODUCT_VERSION``（运行时显示与 UA）
-- ``packaging/android/build_android.sh`` 的 ``APP_VERSION``（APK 命名）
-
-本脚本作为唯一权威校验点：本地可执行、pytest 回归（见
-``tests/test_version_consistency.py``）与 Android 构建脚本都会调用它；
-任意一处版本号改动后其余处未同步，校验即失败。
-"""
+"""校验所有发布入口都从 ``_version.py`` 读取版本，防止产物漂移。"""
 
 from __future__ import annotations
 
 import re
+import runpy
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-_VERSION_PATTERNS = (
-    ("pyproject.toml", re.compile(r'^version = "([^"]+)"', re.MULTILINE)),
-    (
-        "src/deepseek_cli/branding.py",
-        re.compile(r'^PRODUCT_VERSION = "([^"]+)"', re.MULTILINE),
+_REQUIRED_SNIPPETS = {
+    "pyproject.toml": (
+        'dynamic = ["version"]',
+        'version = {attr = "deepseek_cli._version.__version__"}',
     ),
-    (
-        "packaging/android/build_android.sh",
-        re.compile(r'^APP_VERSION="([^"]+)"', re.MULTILINE),
+    "src/deepseek_cli/branding.py": (
+        "from ._version import __version__ as PRODUCT_VERSION",
     ),
-)
+    "packaging/deepseek_app.spec": (
+        "read_project_version.py",
+        'name=f"BanVerse-{app_version}"',
+    ),
+    "packaging/android/build_android.sh": (
+        "read_project_version.py",
+        "check_release_source.py",
+        'APP_VERSION="$("${PYTHON_BIN}"',
+    ),
+    "packaging/android/patch_buildozer_spec.py": ("--app-version",),
+    "packaging/installer.iss": (
+        "#ifndef MyAppVersion",
+        "BanVerse-{#MyAppVersion}-Setup",
+    ),
+    "packaging/verify_smoke.ps1": (
+        "src\\deepseek_cli\\_version.py",
+        '$ProcessName = "BanVerse-$Version"',
+    ),
+    "packaging/build_windows.ps1": (
+        "read_project_version.py",
+        "check_release_source.py",
+    ),
+}
+
+_BANNED_PATTERNS = {
+    "pyproject.toml": (re.compile(r'^version\s*=\s*"', re.MULTILINE),),
+    "packaging/deepseek_app.spec": (
+        re.compile(r'name\s*=\s*"BanVerse-[0-9]'),
+    ),
+    "packaging/android/build_android.sh": (
+        re.compile(r'^APP_VERSION="[0-9]', re.MULTILINE),
+    ),
+    "packaging/installer.iss": (
+        re.compile(r'BanVerse-[0-9]+\.[0-9]+\.[0-9]+'),
+        re.compile(r'MyAppVersion\s+"[0-9]'),
+    ),
+    "packaging/verify_smoke.ps1": (
+        re.compile(r'BanVerse-[0-9]+\.[0-9]+\.[0-9]+'),
+    ),
+    "README.md": (
+        re.compile(r'BanVerse-[0-9]+\.[0-9]+\.[0-9]+'),
+    ),
+}
+
+
+def project_version(root: Path | None = None) -> str:
+    root = Path(root or PROJECT_ROOT)
+    reader_path = root / "packaging" / "read_project_version.py"
+    if not reader_path.is_file():
+        raise RuntimeError(f"找不到版本读取器：{reader_path}")
+    reader = runpy.run_path(str(reader_path))
+    return reader["project_version"](root)
 
 
 def collected_versions(root: Path | None = None) -> dict[str, str | None]:
-    """按文件相对路径收集三处版本号；缺失或解析不到为 None。"""
+    """保留原检查器接口；现在只返回唯一版本源。"""
 
     root = Path(root or PROJECT_ROOT)
-    versions: dict[str, str | None] = {}
-    for relative, pattern in _VERSION_PATTERNS:
-        path = root / relative
-        if not path.exists():
-            versions[relative] = None
-            continue
-        match = pattern.search(path.read_text(encoding="utf-8"))
-        versions[relative] = match.group(1) if match else None
-    return versions
+    try:
+        version = project_version(root)
+    except (OSError, RuntimeError, ValueError):
+        version = None
+    return {"src/deepseek_cli/_version.py": version}
 
 
 def version_mismatches(root: Path | None = None) -> list[str]:
-    """以 pyproject.toml 为基准，返回其余各处版本不一致的说明列表。"""
+    """返回发布入口未复用唯一版本源或仍含硬编码的说明。"""
 
-    versions = collected_versions(root)
-    expected = versions.get("pyproject.toml")
-    if not expected:
-        return ["pyproject.toml 中缺少 version 定义"]
-    mismatches = []
-    for relative, version in versions.items():
-        if relative == "pyproject.toml":
+    root = Path(root or PROJECT_ROOT)
+    problems: list[str] = []
+    try:
+        project_version(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        problems.append(str(exc))
+
+    for relative, snippets in _REQUIRED_SNIPPETS.items():
+        path = root / relative
+        if not path.is_file():
+            problems.append(f"缺少发布文件：{relative}")
             continue
-        if version != expected:
-            mismatches.append(
-                f"{relative}: 版本 {version!r} 与 pyproject.toml 的 "
-                f"{expected!r} 不一致"
-            )
-    return mismatches
+        text = path.read_text(encoding="utf-8")
+        for snippet in snippets:
+            if snippet not in text:
+                problems.append(f"{relative}: 缺少动态版本引用 {snippet!r}")
+
+    for relative, patterns in _BANNED_PATTERNS.items():
+        path = root / relative
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for pattern in patterns:
+            if pattern.search(text):
+                problems.append(
+                    f"{relative}: 仍包含硬编码版本（{pattern.pattern}）"
+                )
+    return problems
 
 
 def main() -> int:
     problems = version_mismatches()
     if problems:
-        print("错误：项目版本号不一致：")
+        print("错误：发布版本配置不一致：")
         for problem in problems:
             print(f"  - {problem}")
-        print("请同步修改三处版本号后重试。")
         return 1
-    versions = collected_versions()
-    print(f"版本号一致：{versions['pyproject.toml']}")
+    print(f"版本单一来源校验通过：{project_version()}")
     return 0
 
 
