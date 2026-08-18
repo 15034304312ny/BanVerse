@@ -198,6 +198,7 @@ def main() -> int:
             notification_sound=None,
             media_root=data_root,
         )
+        application.aboutToQuit.connect(window.shutdown)
         if android:
             window.showMaximized()
         else:
@@ -215,7 +216,10 @@ def main() -> int:
             os.environ.get("BANVERSE_SMOKE_TEST") == "1"
             or os.environ.get("DEEPSEEK_CHAT_SMOKE_TEST") == "1"
         ):
-            QTimer.singleShot(500, application.quit)
+            # 先关闭主窗口，让其同步停止头像、摘要和自主发图线程；直接
+            # application.quit() 会跳过 closeEvent，并在 onefile 进程退出时
+            # 留下仍在运行的 QThread。
+            QTimer.singleShot(500, window.close)
         return application.exec()
     except Exception as error:
         if _smoke_test_enabled():

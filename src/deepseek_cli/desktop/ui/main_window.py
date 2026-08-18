@@ -1439,7 +1439,11 @@ class MainWindow(QMainWindow):
             stylesheet(dark, mobile=self._mobile)
         )
 
-    def closeEvent(self, event: QCloseEvent) -> None:
+    def shutdown(self) -> None:
+        """幂等停止所有计时器和后台线程，供窗口关闭与应用退出共用。"""
+
+        if self._shutting_down:
+            return
         self._shutting_down = True
         self._proactive.stop()
         self._character_discovery.stop()
@@ -1458,4 +1462,7 @@ class MainWindow(QMainWindow):
             self._character_avatar_runner.shutdown()
         if self._image_runner is not None:
             self._image_runner.shutdown()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.shutdown()
         event.accept()
