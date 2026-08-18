@@ -15,6 +15,7 @@ import deepseek_cli.desktop.image_service as image_service_module
 from deepseek_cli.desktop.assets import (
     AvatarError,
     import_chat_image,
+    install_generated_avatar,
     install_generated_image,
 )
 from deepseek_cli.desktop.image_service import (
@@ -74,6 +75,22 @@ def test_invalid_chat_and_generated_images_are_rejected(tmp_path, qapp):
         import_chat_image(invalid, app_data_root=tmp_path)
     with pytest.raises(AvatarError):
         install_generated_image(b"not an image", app_data_root=tmp_path)
+
+
+def test_generated_avatar_is_center_cropped_and_saved_in_appdata(
+    tmp_path, qapp
+):
+    installed = install_generated_avatar(
+        image_bytes(tmp_path, width=900, height=500),
+        app_data_root=tmp_path / "appdata",
+    )
+    loaded = QImage(installed)
+
+    assert loaded.width() == 512
+    assert loaded.height() == 512
+    assert Path(installed).parent.name == "generated"
+    assert Path(installed).parent.parent.name == "avatars"
+    assert tmp_path / "appdata" in Path(installed).parents
 
 
 def test_openai_service_sends_base64_vision_input_and_decodes_generation(

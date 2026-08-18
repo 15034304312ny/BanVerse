@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,6 +50,7 @@ from ..ai_features import (
 from ..assets import AvatarError, import_chat_image
 from ..background import (
     AutonomousImageRunner,
+    CharacterAvatarRunner,
     CharacterDiscoveryRunner,
     SummaryRunner,
 )
@@ -118,6 +120,7 @@ class MainWindow(QMainWindow):
         self._character_discovery = CharacterDiscoveryScheduler(settings, self)
         self._summary_runner: SummaryRunner | None = None
         self._character_discovery_runner: CharacterDiscoveryRunner | None = None
+        self._character_avatar_runner: CharacterAvatarRunner | None = None
         self._image_runner: AutonomousImageRunner | None = None
         self._flow: MessageFlowController | None = None
         self._active_delivery: ReplyDelivery | None = None
@@ -286,6 +289,14 @@ class MainWindow(QMainWindow):
             on_error=self._on_random_character_error,
             parent=self,
         )
+        self._character_avatar_runner = CharacterAvatarRunner(
+            create_image_service=self._create_image_service,
+            image_api_key=self._image_api_key,
+            on_generated=self._on_random_character_avatar_generated,
+            on_error=self._on_random_character_avatar_error,
+            app_data_root=self._media_root,
+            parent=self,
+        )
         self._image_runner = AutonomousImageRunner(
             chats=self._chats,
             characters=self._characters,
@@ -302,6 +313,7 @@ class MainWindow(QMainWindow):
             media_root=self._media_root,
             parent=self,
         )
+        self._enqueue_missing_generated_avatars()
         self._flow = MessageFlowController(
             settings=self._settings,
             tts_auto_play_check=lambda: self._settings.get_bool(
@@ -340,6 +352,13 @@ class MainWindow(QMainWindow):
         """随机新角色后台线程（测试等待其空闲时读取）。"""
 
         runner = self._character_discovery_runner
+        return runner.thread if runner else None
+
+    @property
+    def _character_avatar_thread(self) -> QThread | None:
+        """随机角色头像后台线程（测试等待其空闲时读取）。"""
+
+        runner = self._character_avatar_runner
         return runner.thread if runner else None
 
     @property
@@ -1038,6 +1057,16 @@ class MainWindow(QMainWindow):
         self._character_discovery.record_generated()
         self._settings.set("character_discovery_last_error", "")
         self._settings.set("character_discovery_last_name", character.name)
+        if (
+            self._character_avatar_runner is None
+            or not self._character_avatar_runner.enqueue(
+                character.id, character.card
+            )
+        ):
+            self._settings.set(
+                "character_discovery_avatar_last_error",
+                "image_api_key_missing",
+            )
         self.characters_page.refresh()
         self.conversations.refresh(select_id=self._conversation_id)
         self._play_notification()
@@ -1051,6 +1080,67 @@ class MainWindow(QMainWindow):
             self._settings.set(
                 "character_discovery_last_error",
                 str(error_code or "character_generation_failed")[:120],
+            )
+
+    @staticmethod
+    def _is_discovered_character(card: dict) -> bool:
+        data = card.get("data", {}) if isinstance(card, dict) else {}
+        extensions = (
+            data.get("extensions", {}) if isinstance(data, dict) else {}
+        )
+        app = (
+            extensions.get("deepseek_chat", {})
+            if isinstance(extensions, dict)
+            else {}
+        )
+        return bool(
+            isinstance(app, dict)
+            and app.get("generated") is True
+            and app.get("source") == "character_discovery"
+        )
+
+    def _enqueue_missing_generated_avatars(self) -> None:
+        """为当前及旧版本创建的无头像随机角色补齐头像。"""
+
+        runner = self._character_avatar_runner
+        if runner is None or not self._image_api_key():
+            return
+        for character in self._characters.list():
+            if (
+                not character.avatar_path
+                and self._is_discovered_character(character.card)
+            ):
+                runner.enqueue(character.id, character.card)
+
+    def _on_random_character_avatar_generated(
+        self, character_id: str, avatar_path: str
+    ) -> None:
+        """仅为空头像落库，避免覆盖用户生成期间手动选择的新头像。"""
+
+        character = self._characters.get(character_id)
+        if self._shutting_down or character is None or character.avatar_path:
+            with suppress(OSError):
+                Path(avatar_path).unlink(missing_ok=True)
+            return
+        self._characters.update(character.id, character.card, avatar_path)
+        self._settings.set("character_discovery_avatar_last_error", "")
+        self._settings.set(
+            "character_discovery_avatar_last_name", character.name
+        )
+        self.characters_page.refresh()
+        self.conversations.refresh(select_id=self._conversation_id)
+        if self._conversation_id:
+            self._open_conversation(self._conversation_id, force_reload=True)
+
+    def _on_random_character_avatar_error(
+        self, character_id: str, error_code: str
+    ) -> None:
+        """记录头像失败但保留角色；下次启动或更新凭据时可再次补齐。"""
+
+        if not self._shutting_down:
+            self._settings.set(
+                "character_discovery_avatar_last_error",
+                str(error_code or "character_avatar_generation_failed")[:120],
             )
 
     def _send_proactive_message(self) -> None:
@@ -1337,6 +1427,7 @@ class MainWindow(QMainWindow):
         if self._text_api_key() and not self._chats.list_conversations():
             self._new_conversation()
         self._enqueue_pending_summaries()
+        self._enqueue_missing_generated_avatars()
 
     def _apply_theme(self, value: str) -> None:
         if value == "system":
@@ -1363,6 +1454,8 @@ class MainWindow(QMainWindow):
             self._summary_runner.shutdown()
         if self._character_discovery_runner is not None:
             self._character_discovery_runner.shutdown()
+        if self._character_avatar_runner is not None:
+            self._character_avatar_runner.shutdown()
         if self._image_runner is not None:
             self._image_runner.shutdown()
         event.accept()

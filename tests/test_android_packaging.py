@@ -166,7 +166,8 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
     assert "wav" in rendered
     assert "android.api = 36" in rendered
     assert "android.minapi = 28" in rendered
-    assert "android.numeric_version = 1028101012" in rendered
+    expected_version_code = module.android_version_code(PROJECT_VERSION)
+    assert f"android.numeric_version = {expected_version_code}" in rendered
     assert f"version = {PROJECT_VERSION}" in rendered
     assert "requirements = python3==3.11.13,hostpython3==3.11.13" in rendered
     assert "plugins_multimedia_ffmpegmediaplugin" not in rendered

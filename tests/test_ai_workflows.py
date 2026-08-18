@@ -830,6 +830,17 @@ def test_random_character_is_generated_as_new_contact_without_switching_chat(
     current = chats.create_conversation(
         title=existing.name, character_id=existing.id
     )
+    avatar_source = tmp_path / "generated-avatar-source.png"
+    avatar_image = QImage(900, 500, QImage.Format.Format_RGB32)
+    avatar_image.fill(Qt.GlobalColor.cyan)
+    assert avatar_image.save(str(avatar_source), "PNG")
+    avatar_prompts = []
+
+    class AvatarImageService:
+        def generate_image(self, prompt):
+            avatar_prompts.append(prompt)
+            return avatar_source.read_bytes()
+
     notification = FakeNotificationSound()
     window = MainWindow(
         chats,
@@ -837,14 +848,21 @@ def test_random_character_is_generated_as_new_contact_without_switching_chat(
         settings,
         FakeCredentials(),
         gateway_factory=lambda _key: FeatureGateway(),
+        image_service_factory=lambda _key, **_kwargs: AvatarImageService(),
         notification_sound=notification,
+        media_root=tmp_path / "appdata",
     )
     qtbot.addWidget(window)
 
     window._generate_random_character()
     qtbot.waitUntil(
         lambda: len(characters.list()) == 2
-        and window._character_discovery_thread is None,
+        and window._character_discovery_thread is None
+        and window._character_avatar_thread is None
+        and any(
+            item.name == "顾遥" and item.avatar_path
+            for item in characters.list()
+        ),
         timeout=5_000,
     )
 
@@ -860,11 +878,119 @@ def test_random_character_is_generated_as_new_contact_without_switching_chat(
     assert window._conversation_id == current.id
     assert settings.get("character_discovery_count") == "1"
     assert settings.get("character_discovery_last_name") == "顾遥"
+    assert settings.get("character_discovery_avatar_last_name") == "顾遥"
+    assert Path(discovered.avatar_path).is_file()
+    assert QImage(discovered.avatar_path).size().width() == 512
+    assert QImage(discovered.avatar_path).size().height() == 512
+    assert len(avatar_prompts) == 1
+    assert "城市声音采集师" in avatar_prompts[0]
+    assert "正方形裁切安全区" in avatar_prompts[0]
     assert notification.play_count == 1
 
     # 当日上限生效：再次到期不会调用模型或新增联系人。
     window._generate_random_character()
     assert len(characters.list()) == 2
+
+    window.close()
+    database.close()
+
+
+def test_existing_generated_character_without_avatar_is_backfilled(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    card = empty_card("旧版自动角色")
+    card["data"]["description"] = "三十岁的奇幻城市植物学家，深绿色短发。"
+    card["data"]["extensions"] = {
+        "deepseek_chat": {
+            "generated": True,
+            "source": "character_discovery",
+        }
+    }
+    character = characters.create(card)
+    chats.create_conversation(title=character.name, character_id=character.id)
+    source = tmp_path / "backfill-avatar.png"
+    image = QImage(480, 640, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.green)
+    assert image.save(str(source), "PNG")
+
+    class BackfillImageService:
+        def generate_image(self, _prompt):
+            return source.read_bytes()
+
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: FeatureGateway(),
+        image_service_factory=lambda _key, **_kwargs: BackfillImageService(),
+        media_root=tmp_path / "appdata",
+    )
+    qtbot.addWidget(window)
+
+    qtbot.waitUntil(
+        lambda: window._character_avatar_thread is None
+        and bool(characters.get(character.id).avatar_path),
+        timeout=5_000,
+    )
+    restored = characters.get(character.id)
+    assert restored is not None
+    assert Path(restored.avatar_path).is_file()
+    assert QImage(restored.avatar_path).width() == 512
+    assert settings.get("character_discovery_avatar_last_name") == character.name
+
+    window.close()
+    database.close()
+
+
+def test_avatar_generation_failure_does_not_remove_generated_character(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("character_discovery_enabled", "true")
+    existing = characters.create(empty_card("已有角色"))
+    chats.create_conversation(title=existing.name, character_id=existing.id)
+
+    class FailingImageService:
+        def generate_image(self, _prompt):
+            raise RuntimeError("provider unavailable")
+
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: FeatureGateway(),
+        image_service_factory=lambda _key, **_kwargs: FailingImageService(),
+        media_root=tmp_path / "appdata",
+    )
+    qtbot.addWidget(window)
+
+    window._generate_random_character()
+    qtbot.waitUntil(
+        lambda: len(characters.list()) == 2
+        and window._character_discovery_thread is None
+        and window._character_avatar_thread is None,
+        timeout=5_000,
+    )
+
+    discovered = next(
+        item for item in characters.list() if item.name == "顾遥"
+    )
+    assert not discovered.avatar_path
+    assert any(
+        item.character_id == discovered.id
+        for item in chats.list_conversations()
+    )
+    assert settings.get("character_discovery_count") == "1"
+    assert settings.get("character_discovery_avatar_last_error")
 
     window.close()
     database.close()

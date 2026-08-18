@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import datetime, timezone
 from email.utils import format_datetime
@@ -131,11 +131,13 @@ class ImageGenerationWorker(QObject):
         prompt: str,
         *,
         app_data_root: str | Path | None = None,
+        image_installer: Callable[..., str] = install_generated_image,
     ) -> None:
         super().__init__()
         self._service = service
         self._prompt = prompt
         self._app_data_root = app_data_root
+        self._image_installer = image_installer
         self._cancel_event = Event()
 
     @Slot()
@@ -145,7 +147,7 @@ class ImageGenerationWorker(QObject):
             if self._cancel_event.is_set():
                 self.cancelled.emit()
                 return
-            path = install_generated_image(
+            path = self._image_installer(
                 image_bytes, app_data_root=self._app_data_root
             )
             if self._cancel_event.is_set():
@@ -155,7 +157,7 @@ class ImageGenerationWorker(QObject):
                 return
             self.completed.emit(path)
         except Exception as exc:
-            LOGGER.exception("Autonomous image generation failed")
+            LOGGER.exception("Image generation failed")
             self.failed.emit(ChatWorker._error_code(exc))
         finally:
             self.finished.emit()

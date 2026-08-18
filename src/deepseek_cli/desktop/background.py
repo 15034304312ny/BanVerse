@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QThread
@@ -23,6 +25,7 @@ from .ai_features import (
     SUMMARY_SYSTEM_PROMPT,
     AutonomousImageDecision,
     autonomous_image_request,
+    character_avatar_prompt,
     character_discovery_request,
     clean_ai_summary,
     parse_autonomous_image_decision,
@@ -31,6 +34,7 @@ from .ai_features import (
     role_memory_request,
     summary_request,
 )
+from .assets import install_generated_avatar
 from .workers import ChatWorker, ImageGenerationWorker
 
 
@@ -322,6 +326,113 @@ class CharacterDiscoveryRunner(QObject):
 
     def shutdown(self) -> None:
         self._shutting_down = True
+        if self._worker is not None:
+            self._worker.cancel()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(1500)
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterAvatarJob:
+    character_id: str
+    card: dict
+
+
+class CharacterAvatarRunner(QObject):
+    """串行生成随机角色头像；失败不会回滚已创建的角色。"""
+
+    def __init__(
+        self,
+        *,
+        create_image_service: Callable[[], Any],
+        image_api_key: Callable[[], str],
+        on_generated: Callable[[str, str], None],
+        on_error: Callable[[str, str], None],
+        app_data_root=None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._create_image_service = create_image_service
+        self._image_api_key = image_api_key
+        self._on_generated = on_generated
+        self._on_error = on_error
+        self._app_data_root = app_data_root
+        self._queue: deque[CharacterAvatarJob] = deque()
+        self._thread: QThread | None = None
+        self._worker: ImageGenerationWorker | None = None
+        self._job: CharacterAvatarJob | None = None
+        self._shutting_down = False
+
+    @property
+    def thread(self) -> QThread | None:
+        return self._thread
+
+    @property
+    def busy(self) -> bool:
+        return self._thread is not None
+
+    def enqueue(self, character_id: str, card: dict) -> bool:
+        if self._shutting_down or not self._image_api_key():
+            return False
+        if self._job is not None and self._job.character_id == character_id:
+            return True
+        self._queue = deque(
+            job for job in self._queue if job.character_id != character_id
+        )
+        self._queue.append(CharacterAvatarJob(character_id, card))
+        self.start_next()
+        return True
+
+    def start_next(self) -> None:
+        if self._shutting_down or self._thread is not None:
+            return
+        while self._queue:
+            job = self._queue.popleft()
+            if not self._image_api_key():
+                self._on_error(job.character_id, "image_api_key_missing")
+                continue
+            try:
+                service = self._create_image_service()
+            except Exception as exc:
+                self._on_error(job.character_id, ChatWorker._error_code(exc))
+                continue
+            self._job = job
+            worker = ImageGenerationWorker(
+                service,
+                character_avatar_prompt(job.card),
+                app_data_root=self._app_data_root,
+                image_installer=install_generated_avatar,
+            )
+            worker.completed.connect(self._generated)
+            worker.failed.connect(self._failed)
+            self._worker = worker
+            self._thread = launch_worker(
+                self, worker, thread_finished=self._finished
+            )
+            return
+
+    def _generated(self, avatar_path: str) -> None:
+        if self._shutting_down or self._job is None:
+            with suppress(OSError):
+                Path(avatar_path).unlink(missing_ok=True)
+            return
+        self._on_generated(self._job.character_id, avatar_path)
+
+    def _failed(self, error_code: str) -> None:
+        if not self._shutting_down and self._job is not None:
+            self._on_error(self._job.character_id, error_code)
+
+    def _finished(self) -> None:
+        self._worker, self._thread = dispose_worker(
+            self._worker, self._thread
+        )
+        self._job = None
+        self.start_next()
+
+    def shutdown(self) -> None:
+        self._shutting_down = True
+        self._queue.clear()
         if self._worker is not None:
             self._worker.cancel()
         if self._thread is not None:

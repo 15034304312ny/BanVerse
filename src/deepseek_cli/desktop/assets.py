@@ -224,6 +224,50 @@ def install_generated_image(
 ) -> str:
     """校验图像服务返回的数据并原子保存到本机。"""
 
+    image = _decode_generated_image(image_bytes)
+    target = media_directory(app_data_root) / "generated" / f"{uuid4()}.png"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _save_image_atomic(
+        image,
+        target,
+        b"PNG",
+        -1,
+        error_message="无法保存生成图片。",
+    )
+    return str(target.resolve())
+
+
+def install_generated_avatar(
+    image_bytes: bytes,
+    *,
+    app_data_root: str | Path | None = None,
+) -> str:
+    """校验生图结果，居中裁切为 512 像素头像并保存到 AppData。"""
+
+    image = _decode_generated_image(image_bytes)
+    side = min(image.width(), image.height())
+    x, y = (image.width() - side) // 2, (image.height() - side) // 2
+    avatar = image.copy(x, y, side, side).scaled(
+        512,
+        512,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    target = avatars_directory(app_data_root) / "generated" / f"{uuid4()}.png"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _save_image_atomic(
+        avatar,
+        target,
+        b"PNG",
+        -1,
+        error_message="无法保存生成头像。",
+    )
+    return str(target.resolve())
+
+
+def _decode_generated_image(image_bytes: bytes) -> QImage:
+    """对聊天配图和角色头像共用的服务响应执行安全解码。"""
+
     if (
         not image_bytes
         or len(image_bytes) > MAX_GENERATED_IMAGE_BYTES
@@ -244,16 +288,7 @@ def install_generated_image(
     image = reader.read()
     if image.isNull():
         raise AvatarError("图像服务返回的数据无法解码。")
-    target = media_directory(app_data_root) / "generated" / f"{uuid4()}.png"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _save_image_atomic(
-        image,
-        target,
-        b"PNG",
-        -1,
-        error_message="无法保存生成图片。",
-    )
-    return str(target.resolve())
+    return image
 
 
 def _save_image_atomic(

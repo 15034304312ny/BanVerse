@@ -3,11 +3,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from deepseek_cli.character_cards import CharacterCardError
+from deepseek_cli.character_cards import CharacterCardError, empty_card
 from deepseek_cli.desktop.ai_features import (
     CharacterDiscoveryScheduler,
     ProactiveMessageScheduler,
     autonomous_image_request,
+    character_avatar_prompt,
     character_discovery_request,
     classify_role_reply,
     clean_ai_summary,
@@ -105,6 +106,27 @@ def test_character_discovery_builds_safe_unique_v2_card():
             json.dumps(generated, ensure_ascii=False),
             existing_names=("林小满",),
         )
+
+
+def test_character_avatar_prompt_uses_card_and_enforces_avatar_composition():
+    card = empty_card("顾遥")
+    card["data"].update(
+        {
+            "description": "二十八岁的城市声音采集师，短发，常背着旧录音机。",
+            "personality": "敏锐、慢热，说话简短。",
+            "scenario": "雨夜的现代都市街巷。",
+            "tags": ["现代都市", "声音采集"],
+        }
+    )
+
+    prompt = character_avatar_prompt(card)
+
+    assert "顾遥" in prompt
+    assert "城市声音采集师" in prompt
+    assert "现代都市、声音采集" in prompt
+    assert "只出现一位成年角色" in prompt
+    assert "正方形裁切安全区" in prompt
+    assert "不得出现" in prompt
 
 
 def test_local_time_context_distinguishes_lunch_and_late_night():

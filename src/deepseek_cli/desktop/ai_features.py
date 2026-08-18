@@ -678,6 +678,45 @@ def parse_discovered_character(
     return normalize_card(card)
 
 
+def character_avatar_prompt(card: dict) -> str:
+    """根据角色卡构造稳定、安全且适合居中裁切的头像提示词。"""
+
+    data = card.get("data", {}) if isinstance(card, dict) else {}
+    if not isinstance(data, dict):
+        data = {}
+
+    def compact(value, limit: int) -> str:
+        return " ".join(str(value or "").split()).strip()[:limit]
+
+    name = compact(data.get("name"), 40) or "未命名角色"
+    description = compact(data.get("description"), 700)
+    personality = compact(data.get("personality"), 400)
+    scenario = compact(data.get("scenario"), 400)
+    raw_tags = data.get("tags", [])
+    tags = (
+        "、".join(
+            compact(item, 24)
+            for item in raw_tags[:8]
+            if isinstance(item, str) and compact(item, 24)
+        )
+        if isinstance(raw_tags, list)
+        else ""
+    )
+    return (
+        "为聊天应用绘制一张原创虚构成年角色头像。\n"
+        f"角色名：{name}\n"
+        f"外貌、职业与背景：{description or '根据角色身份自然设计成年外貌'}\n"
+        f"性格气质：{personality or '自然、有辨识度'}\n"
+        f"世界与生活场景：{scenario or '符合角色设定的生活环境'}\n"
+        f"题材标签：{tags or '原创角色'}\n"
+        "画面要求：只出现一位成年角色，头肩像或半身近景，正面或自然的三分之二侧脸，"
+        "五官清晰，神态符合性格，服装与职业和世界观一致；主体严格位于中央，头部完整，"
+        "四周留出正方形裁切安全区，背景简洁且能轻微暗示角色生活。精致现代数字插画，"
+        "色彩协调，适合作为聊天联系人头像。不得出现其他人物、未成年人、真人肖像、"
+        "文字、签名、Logo、水印、边框、聊天界面或气泡。"
+    )
+
+
 def proactive_request(
     character_name: str,
     *,
