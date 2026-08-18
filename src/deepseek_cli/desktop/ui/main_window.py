@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         image_service_factory: Callable[..., object] | None = None,
         notification_sound: NotificationSound | None = None,
         media_root: str | Path | None = None,
+        background_jobs_enabled: bool = True,
     ) -> None:
         super().__init__()
         self._chats = chats
@@ -109,6 +110,7 @@ class MainWindow(QMainWindow):
         self._gateway_factory = gateway_factory
         self._image_service_factory = image_service_factory
         self._media_root = media_root
+        self._background_jobs_enabled = background_jobs_enabled
         self._speech: SpeechController | None = None
         self._notification_sound: NotificationSound | None = None
         self._shutting_down = False
@@ -313,7 +315,8 @@ class MainWindow(QMainWindow):
             media_root=self._media_root,
             parent=self,
         )
-        self._enqueue_missing_generated_avatars()
+        if self._background_jobs_enabled:
+            self._enqueue_missing_generated_avatars()
         self._flow = MessageFlowController(
             settings=self._settings,
             tts_auto_play_check=lambda: self._settings.get_bool(
@@ -331,9 +334,10 @@ class MainWindow(QMainWindow):
         self._flow.delivery_speech.connect(self._on_delivery_speech)
         self._flow.delivery_notification.connect(self._play_notification)
         self._flow.delivery_finished.connect(self._on_delivery_finished)
-        self._proactive.start()
-        self._character_discovery.start()
-        self._enqueue_pending_summaries()
+        if self._background_jobs_enabled:
+            self._proactive.start()
+            self._character_discovery.start()
+            self._enqueue_pending_summaries()
 
     @property
     def _summary_thread(self) -> QThread | None:

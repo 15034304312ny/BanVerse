@@ -947,6 +947,46 @@ def test_existing_generated_character_without_avatar_is_backfilled(
     database.close()
 
 
+def test_smoke_window_does_not_start_network_background_jobs(tmp_path, qtbot):
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("character_discovery_enabled", "true")
+    card = empty_card("待补头像角色")
+    card["data"]["extensions"] = {
+        "deepseek_chat": {
+            "generated": True,
+            "source": "character_discovery",
+        }
+    }
+    character = characters.create(card)
+    chats.create_conversation(title=character.name, character_id=character.id)
+
+    def forbidden_image_factory(*_args, **_kwargs):
+        raise AssertionError("smoke mode must not create an image service")
+
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: FeatureGateway(),
+        image_service_factory=forbidden_image_factory,
+        media_root=tmp_path / "appdata",
+        background_jobs_enabled=False,
+    )
+    qtbot.addWidget(window)
+
+    assert window._character_avatar_thread is None
+    assert not window._proactive._timer.isActive()
+    assert not window._character_discovery._timer.isActive()
+    assert not characters.get(character.id).avatar_path
+
+    window.close()
+    database.close()
+
+
 def test_avatar_generation_failure_does_not_remove_generated_character(
     tmp_path, qtbot
 ):

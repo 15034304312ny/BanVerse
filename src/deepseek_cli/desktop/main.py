@@ -148,6 +148,7 @@ def _show_startup_failure(
 
 def main() -> int:
     android = is_android_platform()
+    smoke_test = _smoke_test_enabled()
     if android:
         os.environ.setdefault("QT_LOGGING_TO_CONSOLE", "1")
     # Keep legacy storage identifiers so renaming does not orphan chat.db,
@@ -197,28 +198,28 @@ def main() -> int:
             speech=None,
             notification_sound=None,
             media_root=data_root,
+            background_jobs_enabled=not smoke_test,
         )
         application.aboutToQuit.connect(window.shutdown)
         if android:
             window.showMaximized()
         else:
             window.show()
-        QTimer.singleShot(
-            350,
-            lambda: _initialize_optional_audio(
-                application,
-                window,
-                settings,
-                credentials,
-            ),
-        )
-        if (
-            os.environ.get("BANVERSE_SMOKE_TEST") == "1"
-            or os.environ.get("DEEPSEEK_CHAT_SMOKE_TEST") == "1"
-        ):
+        if not smoke_test:
+            QTimer.singleShot(
+                350,
+                lambda: _initialize_optional_audio(
+                    application,
+                    window,
+                    settings,
+                    credentials,
+                ),
+            )
+        else:
             # 先关闭主窗口，让其同步停止头像、摘要和自主发图线程；直接
             # application.quit() 会跳过 closeEvent，并在 onefile 进程退出时
-            # 留下仍在运行的 QThread。
+            # 留下仍在运行的 QThread。冒烟不初始化可选音频，避免测试窗口
+            # 在音频后端启动过程中立刻退出造成原生析构竞争。
             QTimer.singleShot(500, window.close)
         return application.exec()
     except Exception as error:
