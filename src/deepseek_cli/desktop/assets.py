@@ -9,12 +9,14 @@ from uuid import uuid4
 from PySide6.QtCore import (
     QBuffer,
     QByteArray,
+    QFile,
     QIODevice,
     QSaveFile,
     QStandardPaths,
     Qt,
+    QUrl,
 )
-from PySide6.QtGui import QImageReader, QImageWriter
+from PySide6.QtGui import QImage, QImageReader, QImageWriter
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_PIXELS = 20_000_000
@@ -26,6 +28,61 @@ MAX_CHAT_SIDE = 2_048
 
 class AvatarError(ValueError):
     pass
+
+
+def _load_image_source(
+    source: str | Path,
+    *,
+    max_bytes: int,
+    max_pixels: int,
+    missing_message: str,
+    size_message: str,
+    decode_message: str,
+) -> QImage:
+    """Read a local path, file URL, or Android content URI safely."""
+
+    source_text = str(source)
+    if source_text.lower().startswith("file:"):
+        local_path = QUrl(source_text).toLocalFile()
+        if local_path:
+            source_text = local_path
+
+    backing_store = None
+    if source_text.lower().startswith("content://"):
+        content_file = QFile(source_text)
+        if not content_file.open(QIODevice.OpenModeFlag.ReadOnly):
+            raise AvatarError(missing_message)
+        payload = content_file.read(max_bytes + 1)
+        content_file.close()
+        if not payload or len(payload) > max_bytes:
+            raise AvatarError(missing_message)
+        backing_store = QBuffer(payload)
+        if not backing_store.open(QIODevice.OpenModeFlag.ReadOnly):
+            raise AvatarError(missing_message)
+        reader = QImageReader(backing_store)
+    else:
+        path = Path(source_text)
+        if (
+            not path.is_file()
+            or path.stat().st_size <= 0
+            or path.stat().st_size > max_bytes
+        ):
+            raise AvatarError(missing_message)
+        reader = QImageReader(str(path))
+
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if (
+        not size.isValid()
+        or size.width() <= 0
+        or size.height() <= 0
+        or size.width() * size.height() > max_pixels
+    ):
+        raise AvatarError(size_message)
+    image = reader.read()
+    if image.isNull():
+        raise AvatarError(decode_message)
+    return image
 
 
 def avatars_directory(app_data_root: str | Path | None = None) -> Path:
@@ -100,17 +157,14 @@ def install_builtin_avatar(
 
 
 def import_avatar(source: str | Path) -> str:
-    path = Path(source)
-    if not path.is_file() or path.stat().st_size > MAX_IMAGE_BYTES:
-        raise AvatarError("头像文件不存在或超过 10 MB。")
-    reader = QImageReader(str(path))
-    reader.setAutoTransform(True)
-    size = reader.size()
-    if not size.isValid() or size.width() * size.height() > MAX_PIXELS:
-        raise AvatarError("头像尺寸无效或像素过大。")
-    image = reader.read()
-    if image.isNull():
-        raise AvatarError("无法读取该图片，请选择 PNG、JPEG 或 WebP。")
+    image = _load_image_source(
+        source,
+        max_bytes=MAX_IMAGE_BYTES,
+        max_pixels=MAX_PIXELS,
+        missing_message="头像文件不存在或超过 10 MB。",
+        size_message="头像尺寸无效或像素过大。",
+        decode_message="无法读取该图片，请选择 PNG、JPEG 或 WebP。",
+    )
     side = min(image.width(), image.height())
     x, y = (image.width() - side) // 2, (image.height() - side) // 2
     cropped = image.copy(x, y, side, side).scaled(512, 512)
@@ -120,6 +174,19 @@ def import_avatar(source: str | Path) -> str:
     return str(target)
 
 
+def load_chat_image(source: str | Path) -> QImage:
+    """Load a chat image from local storage or Android's document picker."""
+
+    return _load_image_source(
+        source,
+        max_bytes=MAX_CHAT_IMAGE_BYTES,
+        max_pixels=MAX_CHAT_PIXELS,
+        missing_message="图片不存在、为空或超过 20 MB。",
+        size_message="图片尺寸无效或像素过大。",
+        decode_message="无法读取图片，请选择 PNG、JPEG 或 WebP。",
+    )
+
+
 def import_chat_image(
     source: str | Path,
     *,
@@ -127,26 +194,7 @@ def import_chat_image(
 ) -> str:
     """校验、纠正方向并压缩用户发送的聊天图片。"""
 
-    path = Path(source)
-    if (
-        not path.is_file()
-        or path.stat().st_size <= 0
-        or path.stat().st_size > MAX_CHAT_IMAGE_BYTES
-    ):
-        raise AvatarError("图片不存在、为空或超过 20 MB。")
-    reader = QImageReader(str(path))
-    reader.setAutoTransform(True)
-    size = reader.size()
-    if (
-        not size.isValid()
-        or size.width() <= 0
-        or size.height() <= 0
-        or size.width() * size.height() > MAX_CHAT_PIXELS
-    ):
-        raise AvatarError("图片尺寸无效或像素过大。")
-    image = reader.read()
-    if image.isNull():
-        raise AvatarError("无法读取图片，请选择 PNG、JPEG 或 WebP。")
+    image = load_chat_image(source)
     if max(image.width(), image.height()) > MAX_CHAT_SIDE:
         image = image.scaled(
             MAX_CHAT_SIDE,

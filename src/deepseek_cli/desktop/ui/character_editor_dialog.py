@@ -236,6 +236,7 @@ class CharacterEditorDialog(QDialog):
                 "选择角色头像",
                 "图片 (*.png *.jpg *.jpeg *.webp)",
                 self._avatar_selected,
+                mime_types=("image/png", "image/jpeg", "image/webp"),
             )
             self._file_dialog.finished.connect(self._file_dialog_finished)
             return

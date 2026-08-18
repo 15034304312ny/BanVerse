@@ -27,38 +27,49 @@ def enable_touch_scrolling(
     if not is_android_platform():
         return
     viewport = area.viewport()
-    viewport.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+    # Qt/Android maps the primary finger to mouse events for QWidget controls.
+    # Grabbing TouchGesture leaves that first finger available to child labels
+    # (where it selects text) and only starts scrolling for multi-touch input.
+    viewport.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
     QScroller.grabGesture(
         viewport,
-        QScroller.ScrollerGestureType.TouchGesture,
+        QScroller.ScrollerGestureType.LeftMouseButtonGesture,
     )
     scroller = QScroller.scroller(viewport)
     properties = scroller.scrollerProperties()
-    # 滚动手感优化（参考原生安卓应用）：
-    # - DecelerationFactor 0.12 → 0.4：更高的减速因子让甩动滑得更远更
-    #   顺滑，避免几乎瞬时刹停的生涩感；
-    # - MaximumVelocity 0.5 → 1.2：支持更快的甩动速度；
-    # - AxisLockThreshold：斜向滑动更容易锁定到主轴，减少误触发；
-    # - OvershootWhenScrollable：到顶/到底时可回弹的橡皮筋手感；
-    # - ScrollingCurve OutQuad：松手后先快后慢的自然减速。
+    # QScroller 的距离单位是米而不是像素。旧值 8.0 相当于需要拖动
+    # 8 米才起滚，单指拖动因此落到了消息标签并触发文本选择。
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.MousePressEventDelay, 0.08
+    )
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.DragStartDistance, 0.0015
+    )
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.DragVelocitySmoothingFactor, 0.6
+    )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.ScrollingCurve,
         QEasingCurve(QEasingCurve.Type.OutQuad),
     )
     properties.setScrollMetric(
-        QScrollerProperties.ScrollMetric.DecelerationFactor, 0.4
+        QScrollerProperties.ScrollMetric.DecelerationFactor, 0.12
     )
     properties.setScrollMetric(
-        QScrollerProperties.ScrollMetric.MaximumVelocity, 1.2
+        QScrollerProperties.ScrollMetric.MaximumVelocity, 1.5
     )
     properties.setScrollMetric(
-        QScrollerProperties.ScrollMetric.MinimumVelocity, 0.0
+        QScrollerProperties.ScrollMetric.MinimumVelocity, 0.05
     )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.AxisLockThreshold, 0.7
     )
     properties.setScrollMetric(
-        QScrollerProperties.ScrollMetric.DragStartDistance, 8.0
+        QScrollerProperties.ScrollMetric.MaximumClickThroughVelocity, 0.05
+    )
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.FrameRate,
+        QScrollerProperties.FrameRates.Fps60,
     )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,

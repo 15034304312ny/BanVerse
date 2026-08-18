@@ -166,6 +166,7 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
     assert "wav" in rendered
     assert "android.api = 36" in rendered
     assert "android.minapi = 28" in rendered
+    assert "android.numeric_version = 1028101012" in rendered
     assert f"version = {PROJECT_VERSION}" in rendered
     assert "requirements = python3==3.11.13,hostpython3==3.11.13" in rendered
     assert "plugins_multimedia_ffmpegmediaplugin" not in rendered
@@ -180,6 +181,20 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
     assert f"p4a.commit = {P4A_COMMIT}" in rendered
     assert f"build_dir = {build_dir.resolve()}" in rendered
     assert "warn_on_root = 0" in rendered
+
+
+def test_android_version_code_preserves_update_order():
+    module_spec = importlib.util.spec_from_file_location(
+        "patch_buildozer_spec_version",
+        ANDROID_DIR / "patch_buildozer_spec.py",
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    assert module.android_version_code("1.1.1") == 1028101012
+    assert module.android_version_code("1.1.2") == 1028101022
+    assert module.android_version_code("1.1.2") > module.android_version_code("1.1.1")
 
 
 def _elf64_with_alignment(alignment: int) -> bytes:

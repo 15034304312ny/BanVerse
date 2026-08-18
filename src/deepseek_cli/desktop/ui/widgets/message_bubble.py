@@ -88,7 +88,9 @@ class MessageBubble(QWidget):
             self._reasoning_label = QLabel(reasoning)
             self._reasoning_label.setWordWrap(True)
             self._reasoning_label.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
+                Qt.TextInteractionFlag.NoTextInteraction
+                if self._mobile
+                else Qt.TextInteractionFlag.TextSelectableByMouse
             )
             self._reasoning_label.setVisible(False)
             self._reasoning_label.setProperty("muted", True)
@@ -159,7 +161,9 @@ class MessageBubble(QWidget):
             else Qt.TextFormat.PlainText
         )
         self.text_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
+            Qt.TextInteractionFlag.NoTextInteraction
+            if self._mobile
+            else Qt.TextInteractionFlag.TextSelectableByMouse
         )
         if narration or typing:
             self.text_label.setProperty("muted", True)
@@ -310,7 +314,9 @@ class MessageBubble(QWidget):
             self._reasoning_label = QLabel()
             self._reasoning_label.setWordWrap(True)
             self._reasoning_label.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
+                Qt.TextInteractionFlag.NoTextInteraction
+                if self._mobile
+                else Qt.TextInteractionFlag.TextSelectableByMouse
             )
             self._reasoning_label.setVisible(False)
             self._reasoning_label.setProperty("muted", True)

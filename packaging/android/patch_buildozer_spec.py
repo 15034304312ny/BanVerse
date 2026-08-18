@@ -40,6 +40,15 @@ REQUIRED_EXTENSIONS = {
     "js",
 }
 
+# Reserve the final decimal digit for rebuilds of the same public release.
+# 1.1.1 was initially shipped with p4a's generated 102810101.  The explicit
+# code below is 1028101012, so OriginOS treats this repaired APK as an update
+# while the user-facing version remains 1.1.1.  Later semantic versions still
+# sort after it (for example, 1.1.2 becomes 1028101022).
+ANDROID_MIN_SDK = 28
+ANDROID_BUILD_REVISION = 2
+MAX_ANDROID_VERSION_CODE = 2_100_000_000
+
 # QtLoader invokes System.load() in this exact order.  Qt libraries that are
 # pulled in only as ELF dependencies do not receive JNI_OnLoad, so Qt6Core must
 # be loaded explicitly before Android-facing modules such as Multimedia.
@@ -76,6 +85,34 @@ def _order_qt_libraries(extra_args: str) -> str:
     return extra_args[:values_start] + ordered + extra_args[values_end:]
 
 
+def android_version_code(
+    app_version: str,
+    *,
+    min_sdk: int = ANDROID_MIN_SDK,
+    build_revision: int = ANDROID_BUILD_REVISION,
+) -> int:
+    """Return a monotonic p4a-compatible versionCode with a rebuild digit."""
+
+    if not 0 <= build_revision <= 9:
+        raise ValueError("Android build revision must be between 0 and 9")
+    version_value = 0
+    try:
+        for part in app_version.split("."):
+            component = int(part)
+            if not 0 <= component <= 99:
+                raise ValueError
+            version_value = version_value * 100 + component
+    except ValueError as exc:
+        raise ValueError(
+            f"Android app version must contain numeric components from 0 to 99: {app_version!r}"
+        ) from exc
+    generated = int(f"10{min_sdk}{version_value}")
+    numeric_version = generated * 10 + build_revision
+    if numeric_version > MAX_ANDROID_VERSION_CODE:
+        raise ValueError(f"Android versionCode exceeds {MAX_ANDROID_VERSION_CODE}")
+    return numeric_version
+
+
 def patch_buildozer_spec(
     path: Path,
     *,
@@ -83,6 +120,7 @@ def patch_buildozer_spec(
     p4a_source_dir: Path | None = None,
     build_dir: Path | None = None,
     p4a_commit: str | None = None,
+    android_numeric_version: int | None = None,
 ) -> None:
     path = path.resolve()
     if not path.is_file():
@@ -118,6 +156,9 @@ def patch_buildozer_spec(
         project_root = _project_root(path)
         app_version = _project_version(project_root)
     config.set("app", "version", app_version)
+    if android_numeric_version is None:
+        android_numeric_version = android_version_code(app_version)
+    config.set("app", "android.numeric_version", str(android_numeric_version))
     requirements = _comma_values(
         config.get("app", "requirements", fallback="")
     )
@@ -142,7 +183,7 @@ def patch_buildozer_spec(
     if extra_args:
         config.set("app", "p4a.extra_args", extra_args)
     config.set("app", "android.api", "36")
-    config.set("app", "android.minapi", "28")
+    config.set("app", "android.minapi", str(ANDROID_MIN_SDK))
     config.set("app", "android.accept_sdk_license", "True")
     if p4a_source_dir is not None:
         config.set(
@@ -169,6 +210,7 @@ def main() -> int:
     parser.add_argument("--p4a-source-dir", type=Path)
     parser.add_argument("--build-dir", type=Path)
     parser.add_argument("--p4a-commit")
+    parser.add_argument("--android-numeric-version", type=int)
     arguments = parser.parse_args()
     patch_buildozer_spec(
         arguments.spec,
@@ -176,6 +218,7 @@ def main() -> int:
         p4a_source_dir=arguments.p4a_source_dir,
         build_dir=arguments.build_dir,
         p4a_commit=arguments.p4a_commit,
+        android_numeric_version=arguments.android_numeric_version,
     )
     print(f"buildozer.spec 资源与 SDK 配置已校验：{arguments.spec}")
     return 0

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QImage
 
 import deepseek_cli.desktop.image_service as image_service_module
@@ -50,6 +50,20 @@ def test_chat_image_is_validated_scaled_and_saved_in_appdata(tmp_path, qapp):
     assert loaded.width() == 2048
     assert loaded.height() == 1024
     assert tmp_path / "appdata" in Path(installed).parents
+
+
+def test_chat_image_accepts_file_url_from_native_picker(tmp_path, qapp):
+    source = tmp_path / "picker.png"
+    image = QImage(80, 40, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.cyan)
+    assert image.save(str(source), "PNG")
+
+    installed = import_chat_image(
+        QUrl.fromLocalFile(str(source)).toString(),
+        app_data_root=tmp_path / "appdata",
+    )
+
+    assert QImage(installed).size() == image.size()
 
 
 def test_invalid_chat_and_generated_images_are_rejected(tmp_path, qapp):

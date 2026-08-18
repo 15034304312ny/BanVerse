@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
     QDialog,
@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QScroller,
+    QScrollerProperties,
+    QWidget,
 )
 
 from deepseek_cli.character_cards import empty_card
@@ -23,6 +25,7 @@ from deepseek_cli.desktop.stickers import STICKERS
 from deepseek_cli.desktop.ui.character_editor_dialog import (
     CharacterEditorDialog,
 )
+from deepseek_cli.desktop.ui.file_dialogs import open_mobile_file_dialog
 from deepseek_cli.desktop.ui.pages.characters_page import CharacterRow
 from deepseek_cli.desktop.ui.pages.chat_page import ChatPage
 from deepseek_cli.desktop.ui.pages.conversations_page import ConversationRow
@@ -667,6 +670,10 @@ def test_android_chat_layout_fits_narrow_viewport(monkeypatch, qtbot):
     assert composer.attach_button.height() >= 44
     assert composer.sticker_button.height() >= 44
     assert composer.action.height() >= 44
+    assert (
+        assistant.text_label.textInteractionFlags()
+        == Qt.TextInteractionFlag.NoTextInteraction
+    )
 
 
 def test_android_dialogs_and_stickers_use_mobile_layout(monkeypatch, qtbot):
@@ -695,6 +702,18 @@ def test_android_settings_and_character_rows_are_touch_ready(
     monkeypatch, tmp_path, qtbot
 ):
     monkeypatch.setenv("DEEPSEEK_CHAT_PLATFORM", "android")
+    gestures = []
+    original_grab_gesture = QScroller.grabGesture
+
+    def record_gesture(target, gesture):
+        gestures.append(gesture)
+        return original_grab_gesture(target, gesture)
+
+    monkeypatch.setattr(
+        QScroller,
+        "grabGesture",
+        staticmethod(record_gesture),
+    )
 
     class Credentials:
         get_api_key = staticmethod(lambda: "")
@@ -718,6 +737,14 @@ def test_android_settings_and_character_rows_are_touch_ready(
     qtbot.wait(20)
 
     assert QScroller.hasScroller(page.scroll.viewport())
+    assert QScroller.ScrollerGestureType.LeftMouseButtonGesture in gestures
+    properties = QScroller.scroller(
+        page.scroll.viewport()
+    ).scrollerProperties()
+    drag_distance = properties.scrollMetric(
+        QScrollerProperties.ScrollMetric.DragStartDistance
+    )
+    assert abs(float(drag_distance) - 0.0015) < 1e-9
     assert (
         page.scroll.horizontalScrollBarPolicy()
         == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -782,3 +809,96 @@ def test_android_attachment_picker_is_non_blocking(
     qtbot.wait(10)
     assert composer._attachment_path == str(image_path)
     assert composer._attachment_dialog is None
+
+
+def test_mobile_file_dialog_delivers_selection_on_accept(qtbot, tmp_path):
+    image_path = tmp_path / "accepted.png"
+    image = QImage(24, 24, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.blue)
+    assert image.save(str(image_path), "PNG")
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    selected = []
+
+    dialog = open_mobile_file_dialog(
+        parent,
+        "发送图片",
+        "图片 (*.png)",
+        selected.append,
+        mime_types=("image/png",),
+    )
+    dialog.selectFile(str(image_path))
+    dialog.accept()
+    qtbot.wait(10)
+
+    assert len(selected) == 1
+    selected_path = QUrl.fromUserInput(selected[0]).toLocalFile()
+    assert selected_path.replace("\\", "/") == str(image_path).replace(
+        "\\", "/"
+    )
+
+
+def test_mobile_file_dialog_delivers_selection_on_finished_fallback(
+    qtbot, tmp_path
+):
+    image_path = tmp_path / "finished.png"
+    image = QImage(24, 24, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.cyan)
+    assert image.save(str(image_path), "PNG")
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    selected = []
+
+    dialog = open_mobile_file_dialog(
+        parent,
+        "发送图片",
+        "图片 (*.png)",
+        selected.append,
+        mime_types=("image/png",),
+    )
+    dialog.selectFile(str(image_path))
+    dialog.finished.emit(QDialog.DialogCode.Accepted.value)
+    qtbot.wait(10)
+
+    assert len(selected) == 1
+    selected_path = QUrl.fromUserInput(selected[0]).toLocalFile()
+    assert selected_path.replace("\\", "/") == str(image_path).replace(
+        "\\", "/"
+    )
+
+
+def test_mobile_file_dialog_preserves_android_content_uri(qtbot):
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    selected = []
+    content_uri = "content://media/external/images/media/42"
+    dialog = open_mobile_file_dialog(
+        parent,
+        "发送图片",
+        "图片 (*.png)",
+        selected.append,
+    )
+
+    dialog.urlSelected.emit(QUrl(content_uri))
+    qtbot.wait(10)
+
+    assert selected == [content_uri]
+
+
+def test_mobile_file_dialog_prefers_url_over_lossy_path(qtbot):
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    selected = []
+    content_uri = "content://media/external/images/media/42"
+    dialog = open_mobile_file_dialog(
+        parent,
+        "发送图片",
+        "图片 (*.png)",
+        selected.append,
+    )
+
+    dialog.fileSelected.emit("content:/media/external/images/media/42")
+    dialog.urlSelected.emit(QUrl(content_uri))
+    qtbot.wait(10)
+
+    assert selected == [content_uri]

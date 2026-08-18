@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, Qt, Signal, qWarning
 from PySide6.QtGui import QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ...assets import AvatarError, load_chat_image
 from ...platform import is_android_platform
 from ..file_dialogs import open_mobile_file_dialog
 from .sticker_picker import StickerPickerDialog
@@ -178,9 +179,15 @@ class ChatComposer(QFrame):
         )
 
     def set_attachment(self, path: str) -> None:
-        pixmap = QPixmap(path)
-        if pixmap.isNull():
+        try:
+            image = load_chat_image(path)
+        except AvatarError as exc:
+            qWarning(f"BanVerse could not read the selected image: {exc}")
+            self.attachment_preview.setText("!")
+            self.attachment_name.setText(str(exc))
+            self.attachment_row.show()
             return
+        pixmap = QPixmap.fromImage(image)
         self._attachment_path = path
         self.attachment_preview.setPixmap(
             pixmap.scaled(
@@ -209,6 +216,7 @@ class ChatComposer(QFrame):
                 "发送图片",
                 "图片 (*.png *.jpg *.jpeg *.webp)",
                 self.set_attachment,
+                mime_types=("image/png", "image/jpeg", "image/webp"),
             )
             self._attachment_dialog.finished.connect(
                 self._attachment_dialog_finished
