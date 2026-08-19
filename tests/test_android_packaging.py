@@ -64,6 +64,15 @@ def test_android_stage_contains_runtime_resources_and_dependencies(tmp_path):
     assert (stage / "certifi" / "cacert.pem").is_file()
     assert (
         stage
+        / "android_src"
+        / "app"
+        / "deepseekchat"
+        / "deepseekchat"
+        / "BanVerseActivity.java"
+    ).is_file()
+    assert (stage / "banverse_intent_filters.xml").is_file()
+    assert (
+        stage
         / "deepseek_cli"
         / "desktop"
         / "resources"
@@ -177,11 +186,30 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
         in rendered
     )
     assert "package.name = deepseekchat" in rendered
+    assert (
+        "android.entrypoint = "
+        "app.deepseekchat.deepseekchat.BanVerseActivity"
+    ) in rendered
+    assert (
+        "android.activity_class_name = "
+        "app.deepseekchat.deepseekchat.BanVerseActivity"
+    ) in rendered
+    assert f"android.add_src = {spec.parent / 'android_src'}" in rendered
+    assert (
+        "android.manifest.intent_filters = "
+        f"{spec.parent / 'banverse_intent_filters.xml'}"
+    ) in rendered
     assert "title = 伴界 BanVerse" in rendered
     assert f"p4a.source_dir = {p4a_source.resolve()}" in rendered
     assert f"p4a.commit = {P4A_COMMIT}" in rendered
     assert f"build_dir = {build_dir.resolve()}" in rendered
     assert "warn_on_root = 0" in rendered
+
+
+def test_android_device_runner_launches_custom_activity():
+    runner = (ANDROID_DIR / "run_on_device.ps1").read_text(encoding="utf-8")
+
+    assert "app.deepseekchat.deepseekchat.BanVerseActivity" in runner
 
 
 def test_android_version_code_preserves_update_order():

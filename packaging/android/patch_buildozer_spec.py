@@ -48,6 +48,7 @@ REQUIRED_EXTENSIONS = {
 ANDROID_MIN_SDK = 28
 ANDROID_BUILD_REVISION = 2
 MAX_ANDROID_VERSION_CODE = 2_100_000_000
+ANDROID_ACTIVITY_CLASS = "app.deepseekchat.deepseekchat.BanVerseActivity"
 
 # QtLoader invokes System.load() in this exact order.  Qt libraries that are
 # pulled in only as ELF dependencies do not receive JNI_OnLoad, so Qt6Core must
@@ -185,6 +186,14 @@ def patch_buildozer_spec(
     config.set("app", "android.api", "36")
     config.set("app", "android.minapi", str(ANDROID_MIN_SDK))
     config.set("app", "android.accept_sdk_license", "True")
+    config.set("app", "android.entrypoint", ANDROID_ACTIVITY_CLASS)
+    config.set("app", "android.activity_class_name", ANDROID_ACTIVITY_CLASS)
+    config.set("app", "android.add_src", str(path.parent / "android_src"))
+    config.set(
+        "app",
+        "android.manifest.intent_filters",
+        str(path.parent / "banverse_intent_filters.xml"),
+    )
     if p4a_source_dir is not None:
         config.set(
             "app",

@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $packageName = "app.deepseekchat.deepseekchat"
-$activityName = "org.kivy.android.PythonActivity"
+$activityName = "app.deepseekchat.deepseekchat.BanVerseActivity"
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $bundledAdb = Join-Path $projectRoot "build\android\windows-platform-tools\platform-tools\adb.exe"
 $stableAdb = Join-Path $env:LOCALAPPDATA "Android\platform-tools\adb.exe"

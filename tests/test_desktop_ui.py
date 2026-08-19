@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
@@ -902,3 +902,78 @@ def test_mobile_file_dialog_prefers_url_over_lossy_path(qtbot):
     qtbot.wait(10)
 
     assert selected == [content_uri]
+
+
+def test_mobile_file_dialog_recovers_selection_when_app_returns(
+    qtbot, tmp_path
+):
+    image_path = tmp_path / "returned.png"
+    image = QImage(24, 24, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.magenta)
+    assert image.save(str(image_path), "PNG")
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    selected = []
+
+    dialog = open_mobile_file_dialog(
+        parent,
+        "发送图片",
+        "图片 (*.png)",
+        selected.append,
+        mime_types=("image/png",),
+    )
+    dialog.selectFile(str(image_path))
+    application = QGuiApplication.instance()
+    application.applicationStateChanged.emit(
+        Qt.ApplicationState.ApplicationInactive
+    )
+    application.applicationStateChanged.emit(
+        Qt.ApplicationState.ApplicationActive
+    )
+    qtbot.wait(20)
+
+    assert len(selected) == 1
+    selected_path = QUrl.fromUserInput(selected[0]).toLocalFile()
+    assert selected_path.replace("\\", "/") == str(image_path).replace(
+        "\\", "/"
+    )
+
+
+def test_android_document_bridge_delivers_private_copy(
+    monkeypatch, qtbot, tmp_path
+):
+    monkeypatch.setenv("ANDROID_PRIVATE", str(tmp_path))
+    opened = []
+    monkeypatch.setattr(
+        "deepseek_cli.desktop.ui.file_dialogs.QDesktopServices.openUrl",
+        lambda url: opened.append(url.toString()) or True,
+    )
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    selected = []
+    results = []
+
+    picker = open_mobile_file_dialog(
+        parent,
+        "发送图片",
+        "图片 (*.png)",
+        selected.append,
+        mime_types=("image/png",),
+    )
+    picker.finished.connect(results.append)
+    qtbot.waitUntil(lambda: bool(opened))
+    image_path = tmp_path / "banverse-picker" / "imports" / "selected.png"
+    image_path.parent.mkdir(parents=True)
+    image = QImage(24, 24, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.yellow)
+    assert image.save(str(image_path), "PNG")
+    picker._result_file.parent.mkdir(parents=True, exist_ok=True)
+    picker._result_file.write_text(
+        f"ok\n{image_path}\n",
+        encoding="utf-8",
+    )
+    qtbot.waitUntil(lambda: bool(results))
+
+    assert selected == [str(image_path)]
+    assert results == [QDialog.DialogCode.Accepted.value]
+    assert opened[0].startswith("banverse-picker://open?")

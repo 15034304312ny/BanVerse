@@ -22,6 +22,10 @@ REQUIRED_RESOURCES = (
     "builtin_characters",
     "builtin_avatars",
 )
+ANDROID_ACTIVITY_SOURCE = (
+    "android_src/app/deepseekchat/deepseekchat/BanVerseActivity.java"
+)
+ANDROID_INTENT_FILTERS = "banverse_intent_filters.xml"
 
 
 def _copy_source(source: Path, destination: Path) -> None:
@@ -104,6 +108,8 @@ def validate_stage(stage: Path) -> None:
             stage / "main.py",
             stage / "app_icon.png",
             stage / "pysidedeploy.spec",
+            stage / ANDROID_ACTIVITY_SOURCE,
+            stage / ANDROID_INTENT_FILTERS,
             package / "__init__.py",
             stage / "websocket" / "__init__.py",
             stage / "certifi" / "__init__.py",
@@ -162,6 +168,11 @@ def prepare_stage(
     _copy_source(_websocket_package_dir(), stage / "websocket")
     _copy_source(_certifi_package_dir(), stage / "certifi")
     shutil.copy2(android_dir / "main.py", stage / "main.py")
+    _copy_source(android_dir / "java", stage / "android_src")
+    shutil.copy2(
+        android_dir / ANDROID_INTENT_FILTERS,
+        stage / ANDROID_INTENT_FILTERS,
+    )
     shutil.copy2(
         package_source / "desktop" / "resources" / "app_icon.png",
         stage / "app_icon.png",
