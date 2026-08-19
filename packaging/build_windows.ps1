@@ -3,12 +3,17 @@ param(
     [switch]$SkipChecks,
     [switch]$SkipSmoke,
     [switch]$SkipInstaller,
-    [string]$IsccPath = ""
+    [string]$IsccPath = "",
+    [string]$PythonPath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+$Python = if ($PythonPath) {
+    $PythonPath
+} else {
+    Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+}
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "Project virtual environment not found: $Python"
 }

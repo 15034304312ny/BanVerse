@@ -53,11 +53,11 @@ bash packaging/android/build_android.sh
 成功产物：
 
 ```text
-dist/android/BanVerse-0.1.12-android16-arm64-v8a-debug.apk
+dist/android/BanVerse-<version>-android16-arm64-v8a-debug.apk
 ```
 
 首次构建会下载较大的 Android 工具链。调试 APK 使用测试签名，可用
-`adb install -r dist/android/BanVerse-0.1.12-android16-arm64-v8a-debug.apk` 安装。
+`adb install -r dist/android/BanVerse-<version>-android16-arm64-v8a-debug.apk` 安装。
 
 构建流程会显式重编译 16 KB 对齐的 Shiboken，移除 Android 上不需要的
 FFmpeg 媒体插件，并在签名前逐个检查 APK 中所有 ELF LOAD 段。应用启动时

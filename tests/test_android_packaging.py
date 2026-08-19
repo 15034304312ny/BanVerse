@@ -224,6 +224,7 @@ def test_android_version_code_preserves_update_order():
     assert module.android_version_code("1.1.1") == 1028101012
     assert module.android_version_code("1.1.2") == 1028101022
     assert module.android_version_code("1.1.2") > module.android_version_code("1.1.1")
+    assert module.android_version_code("1.2.0") > module.android_version_code("1.1.2")
 
 
 def _elf64_with_alignment(alignment: int) -> bytes:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from uuid import uuid4
 
@@ -153,12 +154,10 @@ def open_mobile_file_dialog(
     def disconnect_application_state() -> None:
         if application is None:
             return
-        try:
+        with suppress(RuntimeError, TypeError):
             application.applicationStateChanged.disconnect(
                 application_state_changed
             )
-        except (RuntimeError, TypeError):
-            pass
 
     def selected(path: str) -> None:
         nonlocal delivered
