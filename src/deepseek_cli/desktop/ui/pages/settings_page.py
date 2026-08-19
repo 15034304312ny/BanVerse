@@ -1236,12 +1236,40 @@ class SettingsPage(QWidget):
             self._save_character_discovery_settings
         )
         discovery_form.addRow("每日上限", self.character_discovery_daily_limit)
+
+        discovery_gender_row = responsive_row_layout()
+        self.character_discovery_female_percent = QSpinBox()
+        self.character_discovery_female_percent.setRange(0, 100)
+        self.character_discovery_female_percent.setPrefix("女性 ")
+        self.character_discovery_female_percent.setSuffix(" %")
+        self.character_discovery_female_percent.setValue(
+            self._bounded_integer_setting(
+                "character_discovery_female_percent", 50, 0, 100
+            )
+        )
+        self.character_discovery_female_percent.setAccessibleName(
+            "自动生成女性角色的比例"
+        )
+        self.character_discovery_male_percent = QLabel()
+        self.character_discovery_male_percent.setProperty("muted", True)
+        discovery_gender_row.addWidget(
+            self.character_discovery_female_percent
+        )
+        discovery_gender_row.addWidget(
+            self.character_discovery_male_percent
+        )
+        discovery_gender_row.addStretch(1)
+        discovery_form.addRow("性别比例", discovery_gender_row)
+        self.character_discovery_female_percent.valueChanged.connect(
+            self._save_character_discovery_settings
+        )
         discovery_note = QLabel(
             "仅在软件运行时计时。每次生成会调用当前文本平台；成功后角色卡写入本机，"
             "并创建一条新联系人会话。若当前图片平台已配置 API Key，应用会继续在后台"
             "生成正方形角色头像；头像失败不会影响角色和会话，之后可自动补齐。生成失败、"
             "重名或当日达到上限时不会新增角色，也不会占用成功名额。自动生成的角色可照常"
-            "编辑或删除，手动选择的头像不会被自动覆盖。"
+            "编辑或删除，手动选择的头像不会被自动覆盖。性别比例按每次生成独立抽取，"
+            "男性比例为女性比例的剩余部分。"
         )
         discovery_note.setWordWrap(True)
         discovery_note.setProperty("muted", True)
@@ -2623,6 +2651,11 @@ class SettingsPage(QWidget):
         self.character_discovery_min_minutes.setEnabled(enabled)
         self.character_discovery_max_minutes.setEnabled(enabled)
         self.character_discovery_daily_limit.setEnabled(enabled)
+        self.character_discovery_female_percent.setEnabled(enabled)
+        female_percent = self.character_discovery_female_percent.value()
+        self.character_discovery_male_percent.setText(
+            f"男性 {100 - female_percent} %"
+        )
 
     def _save_character_discovery_settings(self, *_args) -> None:
         minimum = self.character_discovery_min_minutes.value()
@@ -2641,6 +2674,10 @@ class SettingsPage(QWidget):
         self._settings.set(
             "character_discovery_daily_limit",
             str(self.character_discovery_daily_limit.value()),
+        )
+        self._settings.set(
+            "character_discovery_female_percent",
+            str(self.character_discovery_female_percent.value()),
         )
         self._update_character_discovery_controls()
         self.character_discovery_settings_changed.emit()

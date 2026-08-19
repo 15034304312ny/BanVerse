@@ -15,6 +15,7 @@ from deepseek_cli.desktop.ai_features import (
     deserialize_reply_segments,
     enrich_role_image_prompt,
     explicit_image_request_prompt,
+    image_time_scene_prompt,
     opening_request,
     parse_autonomous_image_decision,
     parse_discovered_character,
@@ -66,10 +67,12 @@ def test_character_discovery_builds_safe_unique_v2_card():
         [("林小满", "活泼都市妹妹"), ("谢昭宁", "冷静调查者")],
         user_name="阿澈",
         user_persona="喜欢摄影和夜间散步",
+        desired_gender="女性",
     )
     assert "林小满" in request
     assert "喜欢摄影" in request
     assert "不得重名" in request
+    assert "本次角色性别：女性" in request
 
     generated = {
         "name": "顾遥",
@@ -108,6 +111,34 @@ def test_character_discovery_builds_safe_unique_v2_card():
         )
 
 
+def test_discovered_character_records_selected_gender_and_rejects_mismatch():
+    generated = {
+        "name": "陆沉舟",
+        "gender": "男性",
+        "description": "三十一岁的海洋摄影师，常年记录沿岸生态与港口生活。",
+        "personality": "沉静坦率，重视边界，偶尔用冷幽默缓和气氛。",
+        "scenario": "在沿海城市的摄影分享群里添加了用户。",
+        "first_mes": "刚整理完今天的浪花照片，你更喜欢晴天还是阴天的海？",
+        "alternate_greetings": [],
+        "mes_example": "{{user}}: 海边冷吗？\n{{char}}: 风有点大，但还能慢慢走。",
+        "creator_notes": "成年男性海洋摄影师。",
+        "tags": ["沿海城市", "摄影"],
+    }
+
+    card = parse_discovered_character(
+        json.dumps(generated, ensure_ascii=False),
+        expected_gender="男性",
+    )
+
+    assert card["data"]["tags"][0] == "男性"
+    assert card["data"]["extensions"]["deepseek_chat"]["gender"] == "男性"
+    with pytest.raises(CharacterCardError, match="性别"):
+        parse_discovered_character(
+            json.dumps(generated, ensure_ascii=False),
+            expected_gender="女性",
+        )
+
+
 def test_character_avatar_prompt_uses_card_and_enforces_avatar_composition():
     card = empty_card("顾遥")
     card["data"].update(
@@ -119,7 +150,10 @@ def test_character_avatar_prompt_uses_card_and_enforces_avatar_composition():
         }
     )
 
-    prompt = character_avatar_prompt(card)
+    moment = datetime(
+        2026, 8, 20, 19, 10, tzinfo=timezone(timedelta(hours=8))
+    )
+    prompt = character_avatar_prompt(card, current_time=moment)
 
     assert "顾遥" in prompt
     assert "城市声音采集师" in prompt
@@ -127,6 +161,20 @@ def test_character_avatar_prompt_uses_card_and_enforces_avatar_composition():
     assert "只出现一位成年角色" in prompt
     assert "正方形裁切安全区" in prompt
     assert "不得出现" in prompt
+    assert "傍晚" in prompt
+    assert "日落余晖" in prompt
+
+
+def test_image_time_scene_tracks_local_period_without_inventing_weather():
+    moment = datetime(
+        2026, 8, 20, 23, 30, tzinfo=timezone(timedelta(hours=8))
+    )
+
+    prompt = image_time_scene_prompt(moment)
+
+    assert "深夜（23:30）" in prompt
+    assert "深蓝夜色" in prompt
+    assert "不要凭空添加天气" in prompt
 
 
 def test_local_time_context_distinguishes_lunch_and_late_night():
@@ -189,11 +237,15 @@ def test_autonomous_image_decision_is_strict_and_uses_character_context():
             Message("assistant", "刚下班，路边的花店特别好看。"),
         ],
         "等一下，我想把这片晚霞和花店一起分享给你。",
+        current_time=datetime(
+            2026, 8, 20, 18, 30, tzinfo=timezone(timedelta(hours=8))
+        ),
     )
 
     assert "林小满" in request
     assert "成年服装设计师" in request
     assert "晚霞和花店" in request
+    assert "当前图片时间场景：设备当前本地时段为傍晚" in request
     decision = parse_autonomous_image_decision(
         '```json\n{"send_image":true,"prompt":"现代都市傍晚的花店门口，'
         '一位短发成年女设计师举起手机记录晚霞，暖色平面插画"}\n```'
@@ -266,12 +318,18 @@ def test_role_image_prompt_includes_stable_character_context():
     }
 
     prompt = enrich_role_image_prompt(
-        "林小满", card, "抱着一束向日葵站在花店门口"
+        "林小满",
+        card,
+        "抱着一束向日葵站在花店门口",
+        current_time=datetime(
+            2026, 8, 20, 9, 15, tzinfo=timezone(timedelta(hours=8))
+        ),
     )
 
     assert "林小满" in prompt
     assert "成年短发女设计师" in prompt
     assert "向日葵" in prompt
+    assert "上午（09:15）" in prompt
     assert "无界面" in prompt
 
 
@@ -334,4 +392,23 @@ def test_character_discovery_scheduler_enforces_random_interval_and_daily_quota(
     assert scheduler.quota_available(moment + timedelta(days=1))
 
     scheduler.stop()
+    database.close()
+
+
+def test_character_discovery_scheduler_uses_configured_gender_ratio(
+    tmp_path, qapp
+):
+    database = Database(tmp_path / "chat.db")
+    settings = SettingsRepository(database)
+    scheduler = CharacterDiscoveryScheduler(
+        settings, randint=lambda _minimum, _maximum: 50
+    )
+
+    settings.set("character_discovery_female_percent", "100")
+    assert scheduler.choose_gender() == "女性"
+    settings.set("character_discovery_female_percent", "0")
+    assert scheduler.choose_gender() == "男性"
+    settings.set("character_discovery_female_percent", "invalid")
+    assert scheduler.choose_gender() == "女性"
+
     database.close()

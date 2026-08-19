@@ -64,10 +64,11 @@ CHARACTER_DISCOVERY_SYSTEM_PROMPT = """你是 BanVerse 的原创 Character Card 
 强迫用户回复。
 
 只输出一行严格 JSON，不要 Markdown、注释、解释或额外字段：
-{"name":"中文名","description":"成年外貌、职业与背景","personality":"性格、偏好、缺点、说话习惯与边界","scenario":"生活环境与相遇方式","first_mes":"刚添加用户后的首条消息","alternate_greetings":["备用开场1","备用开场2"],"mes_example":"至少两轮示例对话","creator_notes":"简短创作说明","tags":["题材","性格","身份"]}
+{"name":"中文名","gender":"女性或男性","description":"成年外貌、职业与背景","personality":"性格、偏好、缺点、说话习惯与边界","scenario":"生活环境与相遇方式","first_mes":"刚添加用户后的首条消息","alternate_greetings":["备用开场1","备用开场2"],"mes_example":"至少两轮示例对话","creator_notes":"简短创作说明","tags":["题材","性格","身份"]}
 
 所有字段使用简体中文。first_mes 应让用户容易回应，但不要复述整张角色介绍。角色之间的
-职业、人生目标、情绪表达、关系节奏和语言习惯要有实质差异，不能只是换名字。"""
+职业、人生目标、情绪表达、关系节奏和语言习惯要有实质差异，不能只是换名字。请求指定
+性别时必须严格遵循，并让外貌、称谓与示例对话保持一致。"""
 
 AUTONOMOUS_IMAGE_SYSTEM_PROMPT = """你是“虚构角色自主分享图片”的决策器，不与用户对话。
 判断角色刚发出的消息是否处在自然、值得附带一张图片的时机。
@@ -85,8 +86,21 @@ AUTONOMOUS_IMAGE_SYSTEM_PROMPT = """你是“虚构角色自主分享图片”�
 {"send_image":true,"prompt":"可直接交给文生图模型的中文提示词"}
 
 send_image 为 true 时，prompt 必须完整描述主体、角色稳定外观、场景、动作、构图、
-光线和画风，不得包含真实用户，不要生成界面、对话气泡、水印或大段文字。
+光线和画风，并严格采用请求中当前本地时段对应的光线与生活场景；不得包含真实用户，
+不要生成界面、对话气泡、水印或大段文字。
 所有人物均为虚构成年人。拿不准时选择 false。"""
+
+
+_IMAGE_TIME_SCENES = {
+    "清晨": "柔和清透的晨光，环境刚刚苏醒，可自然出现早餐、晨间整理或安静街道",
+    "上午": "明亮自然的上午光线，可自然出现工作、学习、出行或日常活动",
+    "午间": "充足的午间日光，可自然出现午餐、短暂休息或热闹的白昼环境",
+    "下午": "稳定柔和的下午光线，可自然出现工作、散步、下午茶或生活片段",
+    "傍晚": "日落余晖与初亮灯光，可自然出现晚饭、回家路上或傍晚街景",
+    "晚间": "城市灯光或室内暖光，可自然出现晚间放松、聚会或居家生活",
+    "深夜": "克制的深蓝夜色与局部暖光，环境安静，避免错误出现正午阳光",
+    "凌晨": "低照度的安静夜景或柔和室内灯光，氛围平静，避免明亮白昼场景",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +319,28 @@ def deserialize_reply_segments(value: str) -> tuple[ReplySegment, ...]:
     return tuple(result)
 
 
-def enrich_role_image_prompt(character_name: str, card: dict, prompt: str) -> str:
+def image_time_scene_prompt(current_time: datetime | None = None) -> str:
+    """生成与设备本地时段一致、但不臆测天气的绘图场景约束。"""
+
+    context = local_time_context(current_time)
+    scene = _IMAGE_TIME_SCENES.get(
+        context.period,
+        "采用符合设备当前本地时段的自然光线与生活环境",
+    )
+    return (
+        f"设备当前本地时段为{context.period}（{context.moment:%H:%M}）：{scene}。"
+        "若角色世界观不是现代都市，应将同一时段的光线和活动自然换算到其世界；"
+        "不要凭空添加天气，也不要出现与该时段冲突的太阳位置或昼夜环境"
+    )
+
+
+def enrich_role_image_prompt(
+    character_name: str,
+    card: dict,
+    prompt: str,
+    *,
+    current_time: datetime | None = None,
+) -> str:
     """把简短的发图动作补成可直接交给文生图服务的提示词。"""
 
     data = card.get("data", {}) if isinstance(card, dict) else {}
@@ -321,6 +356,7 @@ def enrich_role_image_prompt(character_name: str, card: dict, prompt: str) -> st
         f"虚构成年角色{character_name}" if character_name else "虚构成年角色",
         profile,
         prompt.strip()[:1_000],
+        image_time_scene_prompt(current_time),
         "自然生活感，画面完整，无界面、对话气泡、水印或大段文字",
     ]
     return "；".join(part for part in parts if part)
@@ -555,6 +591,7 @@ def character_discovery_request(
     *,
     user_name: str = "用户",
     user_persona: str = "",
+    desired_gender: str = "",
     current_time: datetime | None = None,
 ) -> str:
     """构造新联系人角色卡请求，并提供有限的去重上下文。"""
@@ -570,9 +607,11 @@ def character_discovery_request(
     existing_text = "\n".join(existing) or "（当前没有角色）"
     clean_user_name = " ".join(str(user_name).split()).strip()[:32] or "用户"
     clean_persona = " ".join(str(user_persona).split()).strip()[:1_500]
+    gender = _normalize_discovery_gender(desired_gender)
     context = local_time_context(current_time)
     return (
         "请生成一位会主动添加用户并自然发来首条消息的新角色。\n"
+        f"本次角色性别：{gender or '随机选择女性或男性'}。\n"
         f"用户称呼：{clean_user_name}\n"
         f"用户自述：{clean_persona or '（未提供，不要臆测）'}\n"
         f"{context.prompt_text}\n\n"
@@ -586,6 +625,7 @@ def parse_discovered_character(
     text: str,
     *,
     existing_names: Sequence[str] = (),
+    expected_gender: str = "",
 ) -> dict:
     """把模型结果收敛为受控的 Character Card V2，拒绝重名和指令注入字段。"""
 
@@ -602,6 +642,16 @@ def parse_discovered_character(
         raise CharacterCardError("新角色响应不是有效 JSON。") from exc
     if not isinstance(payload, dict):
         raise CharacterCardError("新角色响应必须是 JSON 对象。")
+
+    requested_gender = _normalize_discovery_gender(expected_gender)
+    generated_gender = _normalize_discovery_gender(payload.get("gender", ""))
+    if (
+        requested_gender
+        and generated_gender
+        and requested_gender != generated_gender
+    ):
+        raise CharacterCardError("新角色性别与本次选择不一致。")
+    gender = requested_gender or generated_gender
 
     def text_field(
         key: str,
@@ -658,6 +708,8 @@ def parse_discovered_character(
             for item in tags[:8]
             if isinstance(item, str) and item.strip()
         ]
+    if gender and gender not in data["tags"]:
+        data["tags"] = [gender, *data["tags"]][:8]
 
     # 模型输出不能直接成为后续会话的高优先级指令。
     data["system_prompt"] = (
@@ -669,16 +721,30 @@ def parse_discovered_character(
     )
     data["creator"] = "BanVerse AI"
     data["character_version"] = "1.0"
-    data["extensions"] = {
-        "deepseek_chat": {
-            "generated": True,
-            "source": "character_discovery",
-        }
+    app_extension = {
+        "generated": True,
+        "source": "character_discovery",
     }
+    if gender:
+        app_extension["gender"] = gender
+    data["extensions"] = {"deepseek_chat": app_extension}
     return normalize_card(card)
 
 
-def character_avatar_prompt(card: dict) -> str:
+def _normalize_discovery_gender(value: object) -> str:
+    normalized = " ".join(str(value or "").split()).strip().lower()
+    if normalized in {"女性", "女", "female", "woman"}:
+        return "女性"
+    if normalized in {"男性", "男", "male", "man"}:
+        return "男性"
+    return ""
+
+
+def character_avatar_prompt(
+    card: dict,
+    *,
+    current_time: datetime | None = None,
+) -> str:
     """根据角色卡构造稳定、安全且适合居中裁切的头像提示词。"""
 
     data = card.get("data", {}) if isinstance(card, dict) else {}
@@ -709,6 +775,7 @@ def character_avatar_prompt(card: dict) -> str:
         f"性格气质：{personality or '自然、有辨识度'}\n"
         f"世界与生活场景：{scenario or '符合角色设定的生活环境'}\n"
         f"题材标签：{tags or '原创角色'}\n"
+        f"时间场景：{image_time_scene_prompt(current_time)}。\n"
         "画面要求：只出现一位成年角色，头肩像或半身近景，正面或自然的三分之二侧脸，"
         "五官清晰，神态符合性格，服装与职业和世界观一致；主体严格位于中央，头部完整，"
         "四周留出正方形裁切安全区，背景简洁且能轻微暗示角色生活。精致现代数字插画，"
@@ -751,6 +818,8 @@ def autonomous_image_request(
     card: dict,
     history: Sequence[Message],
     answer: str,
+    *,
+    current_time: datetime | None = None,
 ) -> str:
     """为独立决策调用整理少量角色信息和最近上下文。"""
 
@@ -781,6 +850,7 @@ def autonomous_image_request(
         f"{profile}\n\n"
         f"最近对话：\n{context}\n\n"
         f"刚刚发送的角色消息：\n{answer.strip()[:1_500]}\n\n"
+        f"当前图片时间场景：{image_time_scene_prompt(current_time)}。\n\n"
         "判断角色是否会在此刻自主附带一张图片，并按指定 JSON 格式输出。"
     )
 
@@ -940,6 +1010,24 @@ class CharacterDiscoveryScheduler(QObject):
             count = 0
         self._settings.set("character_discovery_count_day", today)
         self._settings.set("character_discovery_count", str(count + 1))
+
+    def choose_gender(self) -> str:
+        """按设置比例为下一位新角色抽取性别。"""
+
+        try:
+            female_percent = int(
+                self._settings.get(
+                    "character_discovery_female_percent", "50"
+                )
+            )
+        except ValueError:
+            female_percent = 50
+        female_percent = max(0, min(female_percent, 100))
+        return (
+            "女性"
+            if self._randint(1, 100) <= female_percent
+            else "男性"
+        )
 
     def _interval_bounds(self) -> tuple[int, int]:
         try:

@@ -258,6 +258,7 @@ class CharacterDiscoveryRunner(QObject):
         self._thread: QThread | None = None
         self._worker: ChatWorker | None = None
         self._existing_names: tuple[str, ...] = ()
+        self._expected_gender = ""
         self._shutting_down = False
 
     @property
@@ -274,6 +275,7 @@ class CharacterDiscoveryRunner(QObject):
         *,
         user_name: str,
         user_persona: str,
+        desired_gender: str = "",
     ) -> bool:
         if self._shutting_down or self._thread is not None:
             return False
@@ -281,6 +283,7 @@ class CharacterDiscoveryRunner(QObject):
         if not api_key:
             return False
         self._existing_names = tuple(name for name, _ in existing_characters)
+        self._expected_gender = desired_gender
         worker = ChatWorker(
             self._create_text_service(api_key),
             MODEL_CHAT,
@@ -289,6 +292,7 @@ class CharacterDiscoveryRunner(QObject):
                 existing_characters,
                 user_name=user_name,
                 user_persona=user_persona,
+                desired_gender=desired_gender,
             ),
             system_prompt=CHARACTER_DISCOVERY_SYSTEM_PROMPT,
             temperature=1.1,
@@ -307,7 +311,9 @@ class CharacterDiscoveryRunner(QObject):
             return
         try:
             card = parse_discovered_character(
-                text, existing_names=self._existing_names
+                text,
+                existing_names=self._existing_names,
+                expected_gender=self._expected_gender,
             )
         except CharacterCardError:
             self._on_error("invalid_character_card")
@@ -323,6 +329,7 @@ class CharacterDiscoveryRunner(QObject):
             self._worker, self._thread
         )
         self._existing_names = ()
+        self._expected_gender = ""
 
     def shutdown(self) -> None:
         self._shutting_down = True

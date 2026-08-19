@@ -444,10 +444,18 @@ def test_settings_separates_text_image_and_tts_providers(tmp_path, qtbot):
     assert page.role_memory_enabled.isChecked()
     assert not page.character_discovery_enabled.isChecked()
     assert not page.character_discovery_min_minutes.isEnabled()
+    assert page.character_discovery_female_percent.value() == 50
+    assert not page.character_discovery_female_percent.isEnabled()
     page.character_discovery_enabled.setChecked(True)
     assert page.character_discovery_min_minutes.isEnabled()
     assert page.character_discovery_max_minutes.isEnabled()
     assert page.character_discovery_daily_limit.isEnabled()
+    assert page.character_discovery_female_percent.isEnabled()
+    page.character_discovery_female_percent.setValue(65)
+    assert page.character_discovery_male_percent.text() == "男性 35 %"
+    assert (
+        page._settings.get("character_discovery_female_percent") == "65"
+    )
     assert page._settings.get("character_discovery_enabled") == "true"
     assert "新联系人会话" in labels
     assert "伴界 BanVerse" in labels

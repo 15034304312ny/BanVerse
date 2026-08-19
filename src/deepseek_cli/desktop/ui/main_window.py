@@ -850,6 +850,7 @@ class MainWindow(QMainWindow):
             if conversation and conversation.character_id
             else None
         )
+        image_time = datetime.now().astimezone()
         fallback_prompt = ""
         image_segment_index: int | None = None
         if character is not None and plan.has_image_action:
@@ -859,6 +860,7 @@ class MainWindow(QMainWindow):
                         character.name,
                         character.card,
                         segment.prompt,
+                        current_time=image_time,
                     )
                     image_segment_index = index
                     break
@@ -871,6 +873,7 @@ class MainWindow(QMainWindow):
                 character.name,
                 character.card,
                 explicit_prompt,
+                current_time=image_time,
             )
         if character is not None:
             self._enqueue_autonomous_image(
@@ -1031,6 +1034,7 @@ class MainWindow(QMainWindow):
             profiles,
             user_name=self._settings.get("user_name", "用户"),
             user_persona=self._settings.get("user_persona", ""),
+            desired_gender=self._character_discovery.choose_gender(),
         )
 
     def _on_random_character_generated(self, card: dict) -> None:

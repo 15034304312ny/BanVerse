@@ -826,6 +826,7 @@ def test_random_character_is_generated_as_new_contact_without_switching_chat(
     settings = SettingsRepository(database)
     settings.set("character_discovery_enabled", "true")
     settings.set("character_discovery_daily_limit", "1")
+    settings.set("character_discovery_female_percent", "100")
     existing = characters.create(empty_card("已有角色"))
     current = chats.create_conversation(
         title=existing.name, character_id=existing.id
@@ -879,11 +880,17 @@ def test_random_character_is_generated_as_new_contact_without_switching_chat(
     assert settings.get("character_discovery_count") == "1"
     assert settings.get("character_discovery_last_name") == "顾遥"
     assert settings.get("character_discovery_avatar_last_name") == "顾遥"
+    assert "女性" in discovered.card["data"]["tags"]
+    assert (
+        discovered.card["data"]["extensions"]["deepseek_chat"]["gender"]
+        == "女性"
+    )
     assert Path(discovered.avatar_path).is_file()
     assert QImage(discovered.avatar_path).size().width() == 512
     assert QImage(discovered.avatar_path).size().height() == 512
     assert len(avatar_prompts) == 1
     assert "城市声音采集师" in avatar_prompts[0]
+    assert "设备当前本地时段" in avatar_prompts[0]
     assert "正方形裁切安全区" in avatar_prompts[0]
     assert notification.play_count == 1
 
