@@ -12,6 +12,7 @@ _REQUIRED_SNIPPETS = {
     "pyproject.toml": (
         'dynamic = ["version"]',
         'version = {attr = "deepseek_cli._version.__version__"}',
+        'license = "Apache-2.0"',
     ),
     "src/deepseek_cli/branding.py": (
         "from ._version import __version__ as PRODUCT_VERSION",
@@ -37,6 +38,23 @@ _REQUIRED_SNIPPETS = {
     "packaging/build_windows.ps1": (
         "read_project_version.py",
         "check_release_source.py",
+        "sign_windows.ps1",
+    ),
+    "packaging/build_windows_self_signed.ps1": (
+        "build_windows.ps1",
+        'TrustMode = "SelfSigned"',
+    ),
+    "packaging/install_windows_signing_tools.ps1": (
+        "Microsoft Windows SDK BuildTools NuGet signature",
+        "Get-AuthenticodeSignature",
+        "verify -All",
+    ),
+    "packaging/android/build_android_release.sh": (
+        "BANVERSE_ANDROID_BUILD_VARIANT=release",
+    ),
+    "packaging/android/run_on_device.ps1": (
+        "src\\deepseek_cli\\_version.py",
+        '"dist\\android\\BanVerse-$version-android16-arm64-v8a-release.apk"',
     ),
 }
 

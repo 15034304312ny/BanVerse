@@ -1,6 +1,7 @@
 # Android 构建
 
-本目录使用 Qt 官方 `pyside6-android-deploy`，输出 64 位 ARM 调试 APK。
+本目录使用 Qt 官方 `pyside6-android-deploy`，输出 64 位 ARM
+调试 APK 或用于 GitHub Releases 直接分发的正式签名 APK。
 该工具目前只能从 Linux 或 macOS 主机运行；Windows 请使用 WSL2 Ubuntu。
 
 ## 工具链
@@ -44,7 +45,7 @@ python3.11 tools/cross_compile_android/main.py \
 cd -
 ```
 
-在项目根目录构建：
+在项目根目录构建调试包：
 
 ```bash
 bash packaging/android/build_android.sh
@@ -59,9 +60,28 @@ dist/android/BanVerse-<version>-android16-arm64-v8a-debug.apk
 首次构建会下载较大的 Android 工具链。调试 APK 使用测试签名，可用
 `adb install -r dist/android/BanVerse-<version>-android16-arm64-v8a-debug.apk` 安装。
 
+GitHub 正式发布包必须配置长期 app signing key 后构建：
+
+```bash
+bash packaging/android/build_android_release.sh
+```
+
+成功产物：
+
+```text
+dist/android/BanVerse-<version>-android16-arm64-v8a-release.apk
+```
+
+release 脚本会在启动耗时构建前检查 keystore、密码环境变量和预登记的
+证书 SHA-256 指纹，keystore 必须位于源码目录之外。密钥创建、备份、
+从 v1.2.0 debug 签名迁移和 Windows 签名流程见
+[GitHub 分发签名文档](../SIGNING.md)。
+
 构建流程会显式重编译 16 KB 对齐的 Shiboken，移除 Android 上不需要的
-FFmpeg 媒体插件，并在签名前逐个检查 APK 中所有 ELF LOAD 段。应用启动时
+FFmpeg 媒体插件，并在签名前逐个检查 APK 中所有 ELF LOAD 段。随后先
+`zipalign -P 16`，再执行 `apksigner sign` 和证书指纹复核；签名后不再修改 APK。
+应用启动时
 先显示聊天窗口，再延迟初始化 TTS 和提示音；Python 启动异常会写入应用私有
 目录中的 `bootstrap.log` 与 `startup.log`。
-正式发布前仍需改为 release/AAB、配置自己的签名，并在真机逐项验证
+正式发布前还应在真机逐项验证
 文件选择、系统 TTS、音频播放、网络请求、后台/前台切换及系统权限。

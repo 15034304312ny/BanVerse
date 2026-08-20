@@ -31,14 +31,25 @@ MinVersion=10.0.17763
 PrivilegesRequired=admin
 CloseApplications=yes
 RestartApplications=no
+#ifdef BanVerseSignedBuild
+SignTool=banverse
+SignedUninstaller=yes
+SignToolRetryCount=3
+#endif
 
 [Languages]
 Name: "chinesesimplified"; MessagesFile: "languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
+#ifdef BanVerseSignedBuild
+Source: "{#MyAppExeFullPath}"; DestDir: "{app}"; Flags: ignoreversion signonce
+#else
 Source: "{#MyAppExeFullPath}"; DestDir: "{app}"; Flags: ignoreversion
-; 许可证说明由 About 页面显示；无单独 license 文件时不在此引用。
+#endif
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\NOTICE"; DestDir: "{app}"; DestName: "NOTICE.txt"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

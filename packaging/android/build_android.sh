@@ -13,6 +13,15 @@ WHEEL_DIR="${BUILD_ROOT}/wheels"
 EXEC_DIR="${BUILD_ROOT}/output"
 DIST_DIR="${PROJECT_ROOT}/dist/android"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+BUILD_VARIANT="${BANVERSE_ANDROID_BUILD_VARIANT:-debug}"
+
+case "${BUILD_VARIANT}" in
+    debug|release) ;;
+    *)
+        echo "BANVERSE_ANDROID_BUILD_VARIANT 只允许 debug 或 release。" >&2
+        exit 2
+        ;;
+esac
 
 case "$(uname -s)" in
     Linux|Darwin) ;;
@@ -27,6 +36,51 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     exit 2
 fi
 APP_VERSION="$("${PYTHON_BIN}" "${PROJECT_ROOT}/packaging/read_project_version.py")"
+if [[ "${BUILD_VARIANT}" == "release" ]]; then
+    REQUIRED_SIGNING_VARIABLES=(
+        BANVERSE_ANDROID_KEYSTORE
+        BANVERSE_ANDROID_KEY_ALIAS
+        BANVERSE_ANDROID_STORE_PASSWORD
+        BANVERSE_ANDROID_KEY_PASSWORD
+        BANVERSE_ANDROID_CERT_SHA256
+    )
+    for variable in "${REQUIRED_SIGNING_VARIABLES[@]}"; do
+        if [[ -z "${!variable:-}" ]]; then
+            echo "Android release 签名缺少环境变量：${variable}" >&2
+            exit 2
+        fi
+    done
+    if [[ "${BANVERSE_ANDROID_KEYSTORE}" != /* ]]; then
+        echo "BANVERSE_ANDROID_KEYSTORE 必须是源码目录之外的绝对路径。" >&2
+        exit 2
+    fi
+    if [[ ! -f "${BANVERSE_ANDROID_KEYSTORE}" ]]; then
+        echo "Android release keystore 不存在。" >&2
+        exit 2
+    fi
+    RESOLVED_ANDROID_KEYSTORE="$(
+        "${PYTHON_BIN}" -c \
+            'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' \
+            "${BANVERSE_ANDROID_KEYSTORE}"
+    )"
+    if "${PYTHON_BIN}" -c \
+        'from pathlib import Path; import sys; key = Path(sys.argv[1]).resolve(); root = Path(sys.argv[2]).resolve(); raise SystemExit(0 if key == root or root in key.parents else 1)' \
+        "${RESOLVED_ANDROID_KEYSTORE}" "${PROJECT_ROOT}"; then
+        echo "Android release keystore 不得位于源码目录内。" >&2
+        exit 2
+    fi
+    BANVERSE_ANDROID_KEYSTORE="${RESOLVED_ANDROID_KEYSTORE}"
+    export BANVERSE_ANDROID_KEYSTORE
+    EXPECTED_ANDROID_CERT_SHA256="$(
+        printf '%s' "${BANVERSE_ANDROID_CERT_SHA256}" |
+            tr -d '[:space:]:' |
+            tr '[:upper:]' '[:lower:]'
+    )"
+    if [[ ! "${EXPECTED_ANDROID_CERT_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "BANVERSE_ANDROID_CERT_SHA256 必须是 64 位 SHA-256 证书指纹。" >&2
+        exit 2
+    fi
+fi
 if ! command -v java >/dev/null 2>&1; then
     echo "找不到 Java。请先安装 JDK 21 或更高版本。" >&2
     exit 2
@@ -196,18 +250,24 @@ export LDFLAGS="${LDFLAGS:-} ${PAGE_SIZE_LINKER_FLAG}"
 export APP_LDFLAGS="${APP_LDFLAGS:-} ${PAGE_SIZE_LINKER_FLAG}"
 (
     cd "${STAGE_DIR}"
-    "${HOST_PYTHON}" -m buildozer android debug
+    "${HOST_PYTHON}" -m buildozer android "${BUILD_VARIANT}"
 )
 
-EXPECTED_APK="${EXEC_DIR}/deepseekchat-${APP_VERSION}-arm64-v8a-debug.apk"
+if [[ "${BUILD_VARIANT}" == "release" ]]; then
+    EXPECTED_APK="${EXEC_DIR}/deepseekchat-${APP_VERSION}-arm64-v8a-release-unsigned.apk"
+    APK_PATTERN="deepseekchat-${APP_VERSION}-arm64-v8a-release*.apk"
+else
+    EXPECTED_APK="${EXEC_DIR}/deepseekchat-${APP_VERSION}-arm64-v8a-debug.apk"
+    APK_PATTERN="deepseekchat-${APP_VERSION}-arm64-v8a-debug.apk"
+fi
 if [[ -f "${EXPECTED_APK}" ]]; then
     APK_PATH="${EXPECTED_APK}"
 else
-    APK_PATH="$(find "${STAGE_DIR}" -type f \
-        -name "deepseekchat-${APP_VERSION}-arm64-v8a-debug.apk" -print -quit)"
+    APK_PATH="$(find "${STAGE_DIR}" -type f -name "${APK_PATTERN}" -print -quit)"
 fi
 if [[ -z "${APK_PATH}" ]]; then
-    echo "Android 构建命令已结束，但未找到 ${APP_VERSION} APK。部署目录保留在：${STAGE_DIR}" >&2
+    echo "Android ${BUILD_VARIANT} 构建已结束，但未找到 ${APP_VERSION} APK。" >&2
+    echo "部署目录保留在：${STAGE_DIR}" >&2
     exit 1
 fi
 
@@ -247,17 +307,49 @@ bash "${SCRIPT_DIR}/build_shiboken_16k.sh" \
 BUILD_TOOLS="${SDK_PATH}/build-tools/36.0.0"
 ALIGNED_APK="${BUILD_ROOT}/deepseekchat-16k-aligned.apk"
 "${BUILD_TOOLS}/zipalign" -P 16 -f 4 "${APK_PATH}" "${ALIGNED_APK}"
-"${BUILD_TOOLS}/apksigner" sign \
-    --ks "${HOME}/.android/debug.keystore" \
-    --ks-pass pass:android \
-    --key-pass pass:android \
-    "${ALIGNED_APK}"
-"${BUILD_TOOLS}/apksigner" verify --verbose "${ALIGNED_APK}"
+if [[ "${BUILD_VARIANT}" == "release" ]]; then
+    SIGNED_APK="${BUILD_ROOT}/deepseekchat-release-signed.apk"
+    "${BUILD_TOOLS}/apksigner" sign \
+        --ks "${BANVERSE_ANDROID_KEYSTORE}" \
+        --ks-key-alias "${BANVERSE_ANDROID_KEY_ALIAS}" \
+        --ks-pass env:BANVERSE_ANDROID_STORE_PASSWORD \
+        --key-pass env:BANVERSE_ANDROID_KEY_PASSWORD \
+        --out "${SIGNED_APK}" \
+        "${ALIGNED_APK}"
+else
+    SIGNED_APK="${ALIGNED_APK}"
+    "${BUILD_TOOLS}/apksigner" sign \
+        --ks "${HOME}/.android/debug.keystore" \
+        --ks-pass pass:android \
+        --key-pass pass:android \
+        "${SIGNED_APK}"
+fi
+SIGNATURE_REPORT="$(
+    "${BUILD_TOOLS}/apksigner" verify \
+        --verbose \
+        --print-certs \
+        --min-sdk-version 28 \
+        "${SIGNED_APK}"
+)"
+printf '%s\n' "${SIGNATURE_REPORT}"
+if [[ "${BUILD_VARIANT}" == "release" ]]; then
+    ACTUAL_ANDROID_CERT_SHA256="$(
+        printf '%s\n' "${SIGNATURE_REPORT}" |
+            sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
+            head -n 1 |
+            tr -d '[:space:]:' |
+            tr '[:upper:]' '[:lower:]'
+    )"
+    if [[ "${ACTUAL_ANDROID_CERT_SHA256}" != "${EXPECTED_ANDROID_CERT_SHA256}" ]]; then
+        echo "Android release 证书指纹与预期值不一致，拒绝发布。" >&2
+        exit 2
+    fi
+fi
 "${HOST_PYTHON}" "${SCRIPT_DIR}/check_apk_elf_alignment.py" \
-    "${ALIGNED_APK}"
-APK_PATH="${ALIGNED_APK}"
+    "${SIGNED_APK}"
+APK_PATH="${SIGNED_APK}"
 
-FINAL_APK="${DIST_DIR}/BanVerse-${APP_VERSION}-android16-arm64-v8a-debug.apk"
+FINAL_APK="${DIST_DIR}/BanVerse-${APP_VERSION}-android16-arm64-v8a-${BUILD_VARIANT}.apk"
 cp "${APK_PATH}" "${FINAL_APK}"
 echo "Android APK 已生成：${FINAL_APK}"
 echo "保留的部署目录：${STAGE_DIR}"

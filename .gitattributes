@@ -25,3 +25,4 @@
 *.wav binary
 *.apk binary
 *.exe binary
+*.cer binary

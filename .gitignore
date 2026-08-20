@@ -19,3 +19,12 @@ Thumbs.db
 *.db-shm
 *.db-wal
 *.spec.bak
+.secrets/
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pvk
+*.spc
+*.clixml
+keystore.properties

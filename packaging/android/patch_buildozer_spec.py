@@ -185,6 +185,8 @@ def patch_buildozer_spec(
         config.set("app", "p4a.extra_args", extra_args)
     config.set("app", "android.api", "36")
     config.set("app", "android.minapi", str(ANDROID_MIN_SDK))
+    config.set("app", "android.debug_artifact", "apk")
+    config.set("app", "android.release_artifact", "apk")
     config.set("app", "android.accept_sdk_license", "True")
     config.set("app", "android.entrypoint", ANDROID_ACTIVITY_CLASS)
     config.set("app", "android.activity_class_name", ANDROID_ACTIVITY_CLASS)

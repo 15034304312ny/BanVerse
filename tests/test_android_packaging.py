@@ -120,8 +120,30 @@ def test_android_build_script_uses_official_qt_wheels_and_deployer():
     assert "read_project_version.py" in script
     assert 'APP_VERSION="$("${PYTHON_BIN}"' in script
     assert f'APP_VERSION="{PROJECT_VERSION}"' not in script
-    assert "BanVerse-${APP_VERSION}-android16-arm64-v8a-debug.apk" in script
+    assert (
+        "BanVerse-${APP_VERSION}-android16-arm64-v8a-${BUILD_VARIANT}.apk"
+        in script
+    )
     assert "deepseekchat-${APP_VERSION}-arm64-v8a-debug.apk" in script
+    assert "deepseekchat-${APP_VERSION}-arm64-v8a-release-unsigned.apk" in script
+    assert 'BUILD_VARIANT="${BANVERSE_ANDROID_BUILD_VARIANT:-debug}"' in script
+    assert '"${HOST_PYTHON}" -m buildozer android "${BUILD_VARIANT}"' in script
+    assert "BANVERSE_ANDROID_KEYSTORE" in script
+    assert "BANVERSE_ANDROID_KEY_ALIAS" in script
+    assert "BANVERSE_ANDROID_STORE_PASSWORD" in script
+    assert "BANVERSE_ANDROID_KEY_PASSWORD" in script
+    assert "BANVERSE_ANDROID_CERT_SHA256" in script
+    assert "Android release keystore 不得位于源码目录内" in script
+    assert "--ks-pass env:BANVERSE_ANDROID_STORE_PASSWORD" in script
+    assert "--key-pass env:BANVERSE_ANDROID_KEY_PASSWORD" in script
+    assert "--print-certs" in script
+    assert "ACTUAL_ANDROID_CERT_SHA256" in script
+    assert script.index('"${BUILD_TOOLS}/zipalign"') < script.index(
+        '"${BUILD_TOOLS}/apksigner" sign'
+    )
+    assert script.index('"${BUILD_TOOLS}/apksigner" sign') < script.index(
+        '"${BUILD_TOOLS}/apksigner" verify'
+    )
     assert "reset --hard" not in script
     assert "find \"${EXEC_DIR}\" \"${STAGE_DIR}\"" not in script
     assert "max-page-size=16384" in script
@@ -204,12 +226,27 @@ def test_generated_buildozer_spec_includes_app_resources_and_sdk(tmp_path):
     assert f"p4a.commit = {P4A_COMMIT}" in rendered
     assert f"build_dir = {build_dir.resolve()}" in rendered
     assert "warn_on_root = 0" in rendered
+    assert "android.debug_artifact = apk" in rendered
+    assert "android.release_artifact = apk" in rendered
+
+
+def test_android_release_wrapper_selects_release_variant():
+    script = (ANDROID_DIR / "build_android_release.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "set -Eeuo pipefail" in script
+    assert "BANVERSE_ANDROID_BUILD_VARIANT=release" in script
+    assert 'exec bash "${SCRIPT_DIR}/build_android.sh" "$@"' in script
 
 
 def test_android_device_runner_launches_custom_activity():
     runner = (ANDROID_DIR / "run_on_device.ps1").read_text(encoding="utf-8")
 
     assert "app.deepseekchat.deepseekchat.BanVerseActivity" in runner
+    assert "src\\deepseek_cli\\_version.py" in runner
+    assert "android16-arm64-v8a-release.apk" in runner
+    assert "0.1.12" not in runner
 
 
 def test_android_version_code_preserves_update_order():
@@ -225,6 +262,7 @@ def test_android_version_code_preserves_update_order():
     assert module.android_version_code("1.1.2") == 1028101022
     assert module.android_version_code("1.1.2") > module.android_version_code("1.1.1")
     assert module.android_version_code("1.2.0") > module.android_version_code("1.1.2")
+    assert module.android_version_code("1.2.1") > module.android_version_code("1.2.0")
 
 
 def _elf64_with_alignment(alignment: int) -> bytes:

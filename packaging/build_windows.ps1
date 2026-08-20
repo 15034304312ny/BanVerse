@@ -3,8 +3,16 @@ param(
     [switch]$SkipChecks,
     [switch]$SkipSmoke,
     [switch]$SkipInstaller,
+    [switch]$Sign,
     [string]$IsccPath = "",
-    [string]$PythonPath = ""
+    [string]$PythonPath = "",
+    [string]$SignToolPath = "",
+    [string]$CertificateThumbprint = "",
+    [string]$CertificateSubject = "",
+    [string]$TimestampUrl = "",
+    [ValidateSet("PublicCa", "SelfSigned")]
+    [string]$TrustMode = "PublicCa",
+    [string]$PublicCertificatePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +32,29 @@ if ($LASTEXITCODE -ne 0 -or -not $Version) {
     throw "Unable to read the BanVerse release version."
 }
 Write-Host "Building BanVerse $Version from $ProjectRoot"
+
+$Signer = Join-Path $PSScriptRoot "sign_windows.ps1"
+if ($Sign) {
+    if ($SignToolPath) {
+        $env:BANVERSE_WINDOWS_SIGNTOOL = $SignToolPath
+    }
+    if ($CertificateThumbprint) {
+        $env:BANVERSE_WINDOWS_CERT_THUMBPRINT = $CertificateThumbprint
+    }
+    if ($CertificateSubject) {
+        $env:BANVERSE_WINDOWS_CERT_SUBJECT = $CertificateSubject
+    }
+    if ($TimestampUrl) {
+        $env:BANVERSE_WINDOWS_TIMESTAMP_URL = $TimestampUrl
+    }
+    $env:BANVERSE_WINDOWS_TRUST_MODE = $TrustMode
+    if ($PublicCertificatePath) {
+        $env:BANVERSE_WINDOWS_PUBLIC_CERT = $PublicCertificatePath
+    }
+    if (-not (Test-Path -LiteralPath $Signer -PathType Leaf)) {
+        throw "Windows signing helper was not found: $Signer"
+    }
+}
 
 Push-Location $ProjectRoot
 try {
@@ -45,6 +76,10 @@ try {
     if (-not (Test-Path -LiteralPath $Exe)) {
         throw "Expected executable was not created: $Exe"
     }
+    if ($Sign) {
+        & $Signer -Path $Exe
+        if ($LASTEXITCODE -ne 0) { throw "Executable signing failed." }
+    }
     if (-not $SkipSmoke) {
         & (Join-Path $PSScriptRoot "verify_smoke.ps1")
         if ($LASTEXITCODE -ne 0) { throw "Desktop smoke test failed." }
@@ -63,11 +98,35 @@ try {
         if (-not $IsccPath -or -not (Test-Path -LiteralPath $IsccPath)) {
             throw "Inno Setup 6 ISCC.exe was not found."
         }
-        & $IsccPath "/DMyAppVersion=$Version" "packaging\installer.iss"
+        $IsccArguments = @("/DMyAppVersion=$Version")
+        if ($Sign) {
+            $PowerShell = (Get-Process -Id $PID).Path
+            $InnoFilePlaceholder = [char]36 + "f"
+            $InnoQuotePlaceholder = [char]36 + "q"
+            $InnoSignCommand = (
+                '{0}{1}{0} -NoLogo -NoProfile -ExecutionPolicy Bypass ' +
+                '-File {0}{2}{0} -Path {3}'
+            ) -f (
+                $InnoQuotePlaceholder,
+                $PowerShell,
+                $Signer,
+                $InnoFilePlaceholder
+            )
+            $IsccArguments += "/DBanVerseSignedBuild=1"
+            $IsccArguments += "/Sbanverse=$InnoSignCommand"
+        }
+        $IsccArguments += "packaging\installer.iss"
+        & $IsccPath @IsccArguments
         if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed." }
         $Setup = Join-Path $ProjectRoot "dist\BanVerse-$Version-Setup.exe"
         if (-not (Test-Path -LiteralPath $Setup)) {
             throw "Expected installer was not created: $Setup"
+        }
+        if ($Sign) {
+            & $Signer -Path $Setup -VerifyOnly
+            if ($LASTEXITCODE -ne 0) {
+                throw "Installer signature verification failed."
+            }
         }
     }
 }

@@ -17,7 +17,24 @@ $bundledAdb = Join-Path $projectRoot "build\android\windows-platform-tools\platf
 $stableAdb = Join-Path $env:LOCALAPPDATA "Android\platform-tools\adb.exe"
 
 if (-not $ApkPath) {
-    $ApkPath = Join-Path $projectRoot "dist\android\BanVerse-0.1.12-android16-arm64-v8a-debug.apk"
+    $versionSource = Get-Content -LiteralPath (
+        Join-Path $projectRoot "src\deepseek_cli\_version.py"
+    ) -Raw -Encoding UTF8
+    if ($versionSource -notmatch '__version__\s*=\s*"([^"]+)"') {
+        throw "Unable to read the BanVerse version."
+    }
+    $version = $Matches[1]
+    $releaseApk = Join-Path $projectRoot (
+        "dist\android\BanVerse-$version-android16-arm64-v8a-release.apk"
+    )
+    $debugApk = Join-Path $projectRoot (
+        "dist\android\BanVerse-$version-android16-arm64-v8a-debug.apk"
+    )
+    $ApkPath = if (Test-Path -LiteralPath $releaseApk -PathType Leaf) {
+        $releaseApk
+    } else {
+        $debugApk
+    }
 }
 $ApkPath = [System.IO.Path]::GetFullPath($ApkPath)
 

@@ -60,7 +60,7 @@ def verify_release(*, require_android: bool = True) -> Path:
             PROJECT_ROOT
             / "dist"
             / "android"
-            / f"BanVerse-{version}-android16-arm64-v8a-debug.apk"
+            / f"BanVerse-{version}-android16-arm64-v8a-release.apk"
         )
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:

@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://github.com/15034304312ny/BanVerse/releases/latest"><img src="https://img.shields.io/github/v/release/15034304312ny/BanVerse?display_name=tag&sort=semver" alt="最新版本"></a>
   <a href="https://github.com/15034304312ny/BanVerse/actions/workflows/ci.yml"><img src="https://github.com/15034304312ny/BanVerse/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-D22128.svg" alt="Apache-2.0 License"></a>
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?logo=windows" alt="Windows x64">
   <img src="https://img.shields.io/badge/Android-9%2B-3DDC84?logo=android&logoColor=white" alt="Android 9+">
@@ -25,10 +26,10 @@
 | --- | --- | --- |
 | Windows x64 | `BanVerse-<版本>-Setup.exe` | 安装版，推荐普通用户使用 |
 | Windows x64 | `BanVerse-<版本>.exe` | 免安装单文件版 |
-| Android arm64-v8a | `BanVerse-<版本>-android16-arm64-v8a-debug.apk` | Android 9（API 28）及以上，面向测试分发 |
+| Android arm64-v8a | `BanVerse-<版本>-android16-arm64-v8a-release.apk` | v1.2.1 起的正式签名包，Android 9（API 28）及以上 |
 
 > [!IMPORTANT]
-> 当前 Windows 产物尚未进行 Authenticode 签名，可能触发 SmartScreen 提示；Android APK 使用调试签名，不适合作为应用商店正式包。请只从本仓库 Release 页面下载，并使用 Release 中的 SHA-256 清单校验文件。
+> v1.2.1 Windows 产物使用项目固定的 Authenticode **自签名证书**，用于校验官方构建的完整性和发布者连续性，但不受 Windows 公共 CA 默认信任，因此 SmartScreen 仍可能显示警告。Android 从 v1.2.1 起使用固定 release key。请只从本仓库 Release 页面下载，并使用 Release 中的 SHA-256 清单和 `signing/` 公开指纹交叉校验。
 
 BanVerse 不内置任何第三方平台的 API Key。首次运行后，至少需要配置一个文本 AI 平台才能开始对话；图片和 TTS 均为可选能力，相关调用可能产生平台费用。
 
@@ -175,7 +176,7 @@ GitHub Actions 会在每次 push 和 pull request 上执行相同的静态检查
 安装开发依赖和 Inno Setup 6 后执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -Sign
 ```
 
 构建脚本会检查版本、Git 标签和干净工作区，并依次执行 Ruff、完整测试、PyInstaller 冒烟测试和 Inno Setup 构建。输出：
@@ -189,11 +190,19 @@ dist/BanVerse-<版本>-Setup.exe
 
 Qt 官方 `pyside6-android-deploy` 需要 Linux 或 macOS。Windows 开发机可在 WSL2 Ubuntu 中运行：
 
+调试 APK：
+
 ```bash
 bash packaging/android/build_android.sh
 ```
 
-当前工具链固定为 CPython 3.11、JDK 21+、PySide6 6.11.1、SDK 36、NDK 28c 和 arm64-v8a，并检查 Android 15/16 所需的 16 KB ELF 页面对齐。完整依赖、签名说明和真机测试流程见 [Android 构建文档](packaging/android/README.md) 与 [USB 真机指南](packaging/android/USB_REAL_DEVICE_GUIDE.md)。
+GitHub 正式签名 APK：
+
+```bash
+bash packaging/android/build_android_release.sh
+```
+
+当前工具链固定为 CPython 3.11、JDK 21+、PySide6 6.11.1、SDK 36、NDK 28c 和 arm64-v8a，并检查 Android 15/16 所需的 16 KB ELF 页面对齐。正式版在对齐后使用固定 app signing key 签名，并核验预登记的证书 SHA-256 指纹。完整策略见 [GitHub 分发签名文档](packaging/SIGNING.md)，系统依赖和真机流程见 [Android 构建文档](packaging/android/README.md) 与 [USB 真机指南](packaging/android/USB_REAL_DEVICE_GUIDE.md)。
 
 ## 项目结构
 
@@ -207,6 +216,13 @@ packaging/android/            Android 构建、Java 桥接与真机测试工具
 .github/workflows/ci.yml      GitHub Actions 持续集成
 ```
 
+## 1.2.1 更新
+
+- 为 Windows 便携版、安装器和卸载器加入固定 Authenticode 自签名身份与可信时间戳验证；公开证书和指纹随源码发布。
+- Android 正式包切换为固定 release key，构建时强制核对证书 SHA-256 指纹。
+- 为项目源代码引入 Apache License 2.0，并补充第三方许可声明。
+- 发布清单只接受正式签名 release APK，拒绝调试包进入 GitHub Release。
+
 ## 1.2.0 更新
 
 - 随机角色发现新增女性/男性生成比例设置。
@@ -217,11 +233,17 @@ packaging/android/            Android 构建、Java 桥接与真机测试工具
 
 ## 兼容性与限制
 
-- Android APK 当前只提供 `arm64-v8a` 调试签名构建，最低 API 28，目标 API 36。
-- Windows 单文件版与安装版当前未进行代码签名。
+- Android APK 只提供 `arm64-v8a`，最低 API 28，目标 API 36；v1.2.1 起使用固定 release 签名。
+- v1.2.1 Windows 单文件版、安装器与卸载器使用项目自签名 Authenticode 证书和 RFC 3161 时间戳；该证书不是 Windows 公共 CA 证书，用户应通过官方仓库指纹和 Release 清单验证。
 - AI、图片与云端 TTS 的可用性、模型列表、速率限制和费用由对应第三方平台决定。
 - 本项目不是 SillyTavern、DeepSeek、GRS AI、硅基流动或科大讯飞的官方客户端，也不隶属于这些服务商。
-- 当前仓库未附加开源许可证；公开可见不等于自动授予复制、修改或再分发权利。
+
+## 开源许可
+
+BanVerse 自有源代码使用 [Apache License 2.0](LICENSE)，允许使用、修改、
+商用和再分发，但必须保留许可证与归属声明。打包产物中的 PySide6、
+Qt、edge-tts 等第三方组件继续适用其各自许可证，详见
+[NOTICE](NOTICE) 和 [第三方许可声明](THIRD_PARTY_NOTICES.md)。
 
 ## 参考规范
 

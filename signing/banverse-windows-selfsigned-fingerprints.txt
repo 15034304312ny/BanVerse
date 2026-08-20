@@ -1,0 +1,7 @@
+﻿Trust mode: self-signed Authenticode (not publicly trusted)
+Subject: CN=BanVerse Self-Signed Publisher, O=BanVerse Open Source Project, C=CN
+Issuer: CN=BanVerse Self-Signed Publisher, O=BanVerse Open Source Project, C=CN
+Valid from: 2026-08-20T07:30:55.0000000Z
+Valid until: 2031-08-20T07:40:55.0000000Z
+SHA-256: 385ABA0CC90E18ABDA8E6F43594645BB9FC9AFEBF45E5C6D42F482A6D18413E3
+SHA-1: F7A555EF38AF9C5B6C45BC391CB8E0874E8AE2DC
