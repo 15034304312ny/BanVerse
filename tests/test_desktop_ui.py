@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QGuiApplication, QImage
+from PySide6.QtCore import QCoreApplication, QPointF, Qt, QUrl
+from PySide6.QtGui import QGuiApplication, QImage, QScrollEvent
 from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
@@ -27,6 +27,7 @@ from deepseek_cli.desktop.ui.character_editor_dialog import (
     CharacterEditorDialog,
 )
 from deepseek_cli.desktop.ui.file_dialogs import open_mobile_file_dialog
+from deepseek_cli.desktop.ui.mobile import enable_touch_scrolling
 from deepseek_cli.desktop.ui.pages.characters_page import CharacterRow
 from deepseek_cli.desktop.ui.pages.chat_page import ChatPage
 from deepseek_cli.desktop.ui.pages.conversations_page import ConversationRow
@@ -671,17 +672,18 @@ def test_android_chat_layout_fits_narrow_viewport(monkeypatch, qtbot):
 
     assistant.set_chat_width(360)
     user.set_chat_width(360)
-    host.setFixedSize(360, 130)
-    host.show()
-    qtbot.waitUntil(
-        lambda: composer.width() == 360 and composer.editor.width() >= 320,
-        timeout=1000,
-    )
+    # 直接激活子控件布局，避免 Windows 原生顶层窗口在
+    # DPI 缩放下重算客户区；这里只验证 360px Android 布局。
+    host.resize(360, 130)
+    layout.activate()
+    composer.layout().activate()
+    QCoreApplication.processEvents()
 
     assert assistant.bubble.width() <= 336
     assert user.bubble.width() <= 336
     assert assistant.text_label.maximumWidth() <= 312
     assert user.text_label.maximumWidth() <= 312
+    assert composer.width() == 360
     assert composer.editor.width() >= 320
     assert composer.editor.height() == 52
     assert composer.attach_button.height() >= 44
@@ -782,6 +784,13 @@ def test_android_settings_and_character_rows_are_touch_ready(
         QScrollerProperties.ScrollMetric.AcceleratingFlickSpeedupFactor
     )
     assert float(accelerating_factor) == 1.0
+    for metric in (
+        QScrollerProperties.ScrollMetric.OvershootDragResistanceFactor,
+        QScrollerProperties.ScrollMetric.OvershootDragDistanceFactor,
+        QScrollerProperties.ScrollMetric.OvershootScrollDistanceFactor,
+        QScrollerProperties.ScrollMetric.OvershootScrollTime,
+    ):
+        assert float(properties.scrollMetric(metric)) == 0.0
     horizontal_overshoot = properties.scrollMetric(
         QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy
     )
@@ -809,6 +818,43 @@ def test_android_settings_and_character_rows_are_touch_ready(
     assert row.minimumHeight() == 128
     assert len(row.description.text()) <= 53
     database.close()
+
+
+def test_android_touch_scroll_hard_clamps_boundary_overshoot(
+    monkeypatch, qtbot
+):
+    monkeypatch.setenv("DEEPSEEK_CHAT_PLATFORM", "android")
+    area = QScrollArea()
+    content = QWidget()
+    content.setFixedSize(360, 1600)
+    area.setWidget(content)
+    enable_touch_scrolling(area)
+    qtbot.addWidget(area)
+    area.resize(360, 500)
+    area.show()
+    qtbot.waitUntil(
+        lambda: area.verticalScrollBar().maximum() > 0, timeout=1000
+    )
+
+    bar = area.verticalScrollBar()
+    viewport = area.viewport()
+    bar.setValue(bar.minimum())
+    top_overshoot = QScrollEvent(
+        QPointF(0, bar.minimum()),
+        QPointF(0, -24),
+        QScrollEvent.ScrollState.ScrollUpdated,
+    )
+    assert QCoreApplication.sendEvent(viewport, top_overshoot)
+    assert bar.value() == bar.minimum()
+
+    bar.setValue(bar.maximum())
+    bottom_overshoot = QScrollEvent(
+        QPointF(0, bar.maximum()),
+        QPointF(0, 24),
+        QScrollEvent.ScrollState.ScrollUpdated,
+    )
+    assert QCoreApplication.sendEvent(viewport, bottom_overshoot)
+    assert bar.value() == bar.maximum()
 
 
 def test_android_sticker_picker_is_non_blocking(monkeypatch, qtbot):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEasingCurve, Qt
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
@@ -15,6 +15,50 @@ from PySide6.QtWidgets import (
 )
 
 from ..platform import is_android_platform
+
+
+class _TouchScrollBoundaryGuard(QObject):
+    """Stop kinetic scrolling as soon as Qt reports boundary overshoot."""
+
+    def __init__(self, area: QAbstractScrollArea) -> None:
+        super().__init__(area.viewport())
+        self._area = area
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # 滚动容器销毁时会继续投递 ChildRemoved/Destroy 等事件。
+        # 先按类型返回，避免在 C++ area 已销毁后再访问它。
+        if event.type() != QEvent.Type.Scroll:
+            return super().eventFilter(watched, event)
+
+        overshoot = event.overshootDistance()
+        if overshoot.isNull():
+            return super().eventFilter(watched, event)
+
+        # Android 上即使 OvershootAlwaysOff 已设置，某些 Qt 平台
+        # 路径仍可能投递带 overshootDistance 的 QScrollEvent。若继续
+        # 交给 QAbstractScrollArea，视口会先越界再回弹。在事件层
+        # 终止该次惯性，并把位置硬夹取到有效范围。
+        scroller = QScroller.scroller(watched)
+        if scroller.state() != QScroller.State.Inactive:
+            scroller.stop()
+
+        position = event.contentPos()
+        vertical = self._area.verticalScrollBar()
+        horizontal = self._area.horizontalScrollBar()
+        vertical.setValue(
+            max(
+                vertical.minimum(),
+                min(vertical.maximum(), round(position.y())),
+            )
+        )
+        horizontal.setValue(
+            max(
+                horizontal.minimum(),
+                min(horizontal.maximum(), round(position.x())),
+            )
+        )
+        event.accept()
+        return True
 
 
 def enable_touch_scrolling(
@@ -78,6 +122,21 @@ def enable_touch_scrolling(
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.AcceleratingFlickSpeedupFactor, 1.0
     )
+    # 将越界的最大拖动/惯性距离和回弹时间归零。这些
+    # 指标与 OvershootAlwaysOff 同时设置，防止 Android 平台风格
+    # 仍使用默认距离生成可见的边界位移。
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.OvershootDragResistanceFactor, 0.0
+    )
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.OvershootDragDistanceFactor, 0.0
+    )
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.OvershootScrollDistanceFactor, 0.0
+    )
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.OvershootScrollTime, 0.0
+    )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.FrameRate,
         QScrollerProperties.FrameRates.Fps60,
@@ -91,6 +150,11 @@ def enable_touch_scrolling(
         QScrollerProperties.OvershootPolicy.OvershootAlwaysOff,
     )
     scroller.setScrollerProperties(properties)
+    guard = getattr(area, "_touch_scroll_boundary_guard", None)
+    if not isinstance(guard, _TouchScrollBoundaryGuard):
+        guard = _TouchScrollBoundaryGuard(area)
+        area._touch_scroll_boundary_guard = guard
+        viewport.installEventFilter(guard)
     area.setVerticalScrollBarPolicy(
         Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     )

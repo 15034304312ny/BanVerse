@@ -216,6 +216,12 @@ packaging/android/            Android 构建、Java 桥接与真机测试工具
 .github/workflows/ci.yml      GitHub Actions 持续集成
 ```
 
+## 1.2.3 更新
+
+- 修复 Android 消息列表拖动到顶部或底部后仍会越界回弹的问题。
+- 将拖动越界距离、惯性越界距离和回弹时间归零。
+- 增加视口边界守卫，在 Qt 投递越界事件时立即停止惯性并将位置限制在有效范围。
+
 ## 1.2.2 更新
 
 - 修复 Android 端快速上下滑动松手后突然反向滚动的问题。
