@@ -46,17 +46,19 @@ def enable_touch_scrolling(
         QScrollerProperties.ScrollMetric.DragStartDistance, 0.0015
     )
     properties.setScrollMetric(
-        QScrollerProperties.ScrollMetric.DragVelocitySmoothingFactor, 0.6
+        # 快速反向拖动时让最新采样尽快取代旧方向，避免松手后仍按
+        # 上一段速度继续滚动。
+        QScrollerProperties.ScrollMetric.DragVelocitySmoothingFactor, 0.85
     )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.ScrollingCurve,
         QEasingCurve(QEasingCurve.Type.OutQuad),
     )
     properties.setScrollMetric(
-        QScrollerProperties.ScrollMetric.DecelerationFactor, 0.12
+        QScrollerProperties.ScrollMetric.DecelerationFactor, 0.2
     )
     properties.setScrollMetric(
-        QScrollerProperties.ScrollMetric.MaximumVelocity, 1.5
+        QScrollerProperties.ScrollMetric.MaximumVelocity, 0.9
     )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.MinimumVelocity, 0.05
@@ -67,17 +69,26 @@ def enable_touch_scrolling(
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.MaximumClickThroughVelocity, 0.05
     )
+    # Android 上在惯性滚动尚未结束时快速反向甩动，Qt 默认会把它识别为
+    # accelerating flick 并把旧速度再次放大。关闭该机制后，每次手势都
+    # 独立计算方向和速度，手指按下也能可靠截停上一段惯性。
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.AcceleratingFlickMaximumTime, 0.0
+    )
+    properties.setScrollMetric(
+        QScrollerProperties.ScrollMetric.AcceleratingFlickSpeedupFactor, 1.0
+    )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.FrameRate,
         QScrollerProperties.FrameRates.Fps60,
     )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy,
-        QScrollerProperties.OvershootPolicy.OvershootWhenScrollable,
+        QScrollerProperties.OvershootPolicy.OvershootAlwaysOff,
     )
     properties.setScrollMetric(
         QScrollerProperties.ScrollMetric.VerticalOvershootPolicy,
-        QScrollerProperties.OvershootPolicy.OvershootWhenScrollable,
+        QScrollerProperties.OvershootPolicy.OvershootAlwaysOff,
     )
     scroller.setScrollerProperties(properties)
     area.setVerticalScrollBarPolicy(

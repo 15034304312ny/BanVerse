@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QScroller,
     QScrollerProperties,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -659,15 +660,23 @@ def test_android_chat_layout_fits_narrow_viewport(monkeypatch, qtbot):
     monkeypatch.setenv("DEEPSEEK_CHAT_PLATFORM", "android")
     assistant = MessageBubble("assistant", "这是一条需要自动换行的移动端回复。")
     user = MessageBubble("user", "一条比较长的用户消息，用来检查右侧边界。")
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
     composer = ChatComposer()
-    for widget in (assistant, user, composer):
+    layout.addWidget(composer)
+    for widget in (assistant, user, host):
         qtbot.addWidget(widget)
 
     assistant.set_chat_width(360)
     user.set_chat_width(360)
-    composer.resize(360, 130)
-    composer.show()
-    qtbot.wait(10)
+    host.setFixedSize(360, 130)
+    host.show()
+    qtbot.waitUntil(
+        lambda: composer.width() == 360 and composer.editor.width() >= 320,
+        timeout=1000,
+    )
 
     assert assistant.bubble.width() <= 336
     assert user.bubble.width() <= 336
@@ -753,6 +762,40 @@ def test_android_settings_and_character_rows_are_touch_ready(
         QScrollerProperties.ScrollMetric.DragStartDistance
     )
     assert abs(float(drag_distance) - 0.0015) < 1e-9
+    smoothing = properties.scrollMetric(
+        QScrollerProperties.ScrollMetric.DragVelocitySmoothingFactor
+    )
+    assert abs(float(smoothing) - 0.85) < 1e-9
+    deceleration = properties.scrollMetric(
+        QScrollerProperties.ScrollMetric.DecelerationFactor
+    )
+    assert abs(float(deceleration) - 0.2) < 1e-9
+    maximum_velocity = properties.scrollMetric(
+        QScrollerProperties.ScrollMetric.MaximumVelocity
+    )
+    assert abs(float(maximum_velocity) - 0.9) < 1e-9
+    accelerating_time = properties.scrollMetric(
+        QScrollerProperties.ScrollMetric.AcceleratingFlickMaximumTime
+    )
+    assert float(accelerating_time) == 0.0
+    accelerating_factor = properties.scrollMetric(
+        QScrollerProperties.ScrollMetric.AcceleratingFlickSpeedupFactor
+    )
+    assert float(accelerating_factor) == 1.0
+    horizontal_overshoot = properties.scrollMetric(
+        QScrollerProperties.ScrollMetric.HorizontalOvershootPolicy
+    )
+    vertical_overshoot = properties.scrollMetric(
+        QScrollerProperties.ScrollMetric.VerticalOvershootPolicy
+    )
+    assert (
+        horizontal_overshoot
+        == QScrollerProperties.OvershootPolicy.OvershootAlwaysOff
+    )
+    assert (
+        vertical_overshoot
+        == QScrollerProperties.OvershootPolicy.OvershootAlwaysOff
+    )
     assert (
         page.scroll.horizontalScrollBarPolicy()
         == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
