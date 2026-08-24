@@ -40,7 +40,9 @@ from ....sync_protocol import (
     DEFAULT_SYNC_URL,
     bearer_credential,
     normalize_sync_url,
+    normalize_sync_username,
     parse_sync_pairing,
+    validate_sync_password,
 )
 from ...data.repositories import SettingsRepository
 from ...image_service import (
@@ -227,6 +229,10 @@ class SettingsPage(QWidget):
     sync_settings_changed = Signal()
     sync_now_requested = Signal()
     sync_account_create_requested = Signal(str, str, str)
+    sync_register_requested = Signal(str, str, str, str, str)
+    sync_login_requested = Signal(str, str, str)
+    sync_upgrade_requested = Signal(str, str, str)
+    sync_link_reset_requested = Signal()
     sync_disconnect_requested = Signal()
 
     def __init__(
@@ -1389,63 +1395,150 @@ class SettingsPage(QWidget):
         sync_group = QGroupBox("双端消息同步")
         sync_form = QFormLayout(sync_group)
         configure_mobile_form(sync_form)
+        sync_intro = QLabel(
+            "在电脑和手机上登录同一账号后，角色、会话、消息和聊天图片会自动增量同步。"
+            "密码只用于登录，不会保存在本机；应用仅保存可撤销的设备会话令牌。"
+        )
+        sync_intro.setWordWrap(True)
+        sync_intro.setProperty("muted", True)
+        sync_form.addRow("", sync_intro)
+        saved_username = settings.get("sync_username", "").strip()
+        saved_account_id = settings.get("sync_account_id", "").strip()
+        if saved_username:
+            account_state = f"已登录：{saved_username}"
+        elif saved_account_id:
+            account_state = "已连接旧版令牌账户，可在下方升级为用户名登录"
+        else:
+            account_state = "未登录"
+        self.sync_account_state = QLabel(account_state)
+        self.sync_account_state.setWordWrap(True)
+        sync_form.addRow("账号状态", self.sync_account_state)
+        self.sync_username = QLineEdit(saved_username)
+        self.sync_username.setMaxLength(32)
+        self.sync_username.setPlaceholderText("3–32 位中英文、数字、._-")
+        self.sync_username.setAccessibleName("BanVerse 同步用户名")
+        self.sync_username.setToolTip("PC 和手机使用同一用户名登录；英文字母不区分大小写。")
+        sync_form.addRow("用户名", self.sync_username)
+        self.sync_password = QLineEdit()
+        self.sync_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.sync_password.setMaxLength(128)
+        self.sync_password.setPlaceholderText("至少 8 个字符")
+        self.sync_password.setAccessibleName("BanVerse 同步密码")
+        self.sync_password.setToolTip("仅发送给同步服务器完成登录，不写入本地设置。")
+        sync_form.addRow("密码", self.sync_password)
+        self.sync_password_confirm = QLineEdit()
+        self.sync_password_confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        self.sync_password_confirm.setMaxLength(128)
+        self.sync_password_confirm.setPlaceholderText("注册或升级账户时再次输入")
+        self.sync_password_confirm.setAccessibleName("再次输入 BanVerse 同步密码")
+        sync_form.addRow("确认密码", self.sync_password_confirm)
+        self.sync_show_password = QCheckBox("显示本次输入的密码")
+        self.sync_show_password.toggled.connect(
+            self._toggle_sync_password_visibility
+        )
+        sync_form.addRow("", self.sync_show_password)
+        self.sync_registration_secret = QLineEdit()
+        self.sync_registration_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.sync_registration_secret.setPlaceholderText("仅注册时需要，由服务管理员提供")
+        self.sync_registration_secret.setToolTip(
+            "邀请码只用于限制陌生人注册，不是登录密码，也不会保存。"
+        )
+        sync_form.addRow("注册邀请码", self.sync_registration_secret)
+        auth_actions = responsive_row_layout()
+        sync_login = QPushButton("登录")
+        sync_login.setObjectName("primaryButton")
+        sync_login.clicked.connect(self._login_sync_account)
+        sync_register = QPushButton("注册并登录")
+        sync_register.clicked.connect(self._register_sync_account)
+        self.sync_upgrade = QPushButton("升级旧版账户")
+        self.sync_upgrade.setEnabled(bool(saved_account_id and not saved_username))
+        self.sync_upgrade.setToolTip(
+            "为当前账户 ID/令牌设置用户名和密码；云端消息和图片保持不变。"
+        )
+        self.sync_upgrade.clicked.connect(self._upgrade_sync_account)
+        auth_actions.addWidget(sync_login)
+        auth_actions.addWidget(sync_register)
+        auth_actions.addWidget(self.sync_upgrade)
+        auth_actions.addStretch(1)
+        sync_form.addRow("账号操作", auth_actions)
         self.sync_enabled = QCheckBox("在此设备启用本地优先同步")
         self.sync_enabled.setChecked(settings.get_bool("sync_enabled", False))
+        self.sync_enabled.setToolTip(
+            "关闭后只暂停本机自动上传和下载，不退出账号，也不删除任何数据。"
+        )
         sync_form.addRow("同步", self.sync_enabled)
+
+        sync_primary_actions = responsive_row_layout()
+        sync_now = QPushButton("立即同步")
+        sync_now.clicked.connect(self.sync_now_requested)
+        sync_logout = QPushButton("退出登录")
+        sync_logout.clicked.connect(self._disconnect_sync_account)
+        sync_primary_actions.addWidget(sync_now)
+        sync_primary_actions.addWidget(sync_logout)
+        sync_primary_actions.addStretch(1)
+        sync_form.addRow("", sync_primary_actions)
+
+        sync_advanced = QGroupBox("高级与兼容选项")
+        sync_advanced.setCheckable(True)
+        sync_advanced.setChecked(bool(saved_account_id and not saved_username))
+        sync_advanced.setToolTip(
+            "自托管服务器、设备名称以及旧版账户 ID/令牌登录位于此处。"
+        )
+        advanced_form = QFormLayout(sync_advanced)
+        configure_mobile_form(advanced_form)
         self.sync_server_url = QLineEdit(
             settings.get("sync_server_url", DEFAULT_SYNC_URL)
         )
         self.sync_server_url.setPlaceholderText(DEFAULT_SYNC_URL)
         self.sync_server_url.setAccessibleName("BanVerse 同步服务地址")
-        sync_form.addRow("服务地址", self.sync_server_url)
-        self.sync_account_id = QLineEdit(settings.get("sync_account_id", ""))
-        self.sync_account_id.setPlaceholderText("在另一端输入相同账户 ID")
-        self.sync_account_id.setAccessibleName("BanVerse 同步账户 ID")
-        sync_form.addRow("账户 ID", self.sync_account_id)
-        self.sync_token = QLineEdit()
-        self.sync_token.setEchoMode(QLineEdit.EchoMode.Password)
-        sync_token = getattr(credentials, "get_sync_token", lambda: "")()
-        self.sync_token.setPlaceholderText(
-            "已安全保存" if sync_token else "输入同步令牌"
+        self.sync_server_url.setToolTip(
+            "默认使用 BanVerse 官方 HTTPS 服务；只有自托管时才需要修改。"
         )
-        self.sync_token.setAccessibleName("BanVerse 同步令牌")
-        sync_form.addRow("同步令牌", self.sync_token)
+        advanced_form.addRow("服务地址", self.sync_server_url)
         self.sync_device_name = QLineEdit(
             settings.get("sync_device_name", "BanVerse 设备")
         )
         self.sync_device_name.setMaxLength(120)
-        sync_form.addRow("设备名称", self.sync_device_name)
-        self.sync_registration_secret = QLineEdit()
-        self.sync_registration_secret.setEchoMode(QLineEdit.EchoMode.Password)
-        self.sync_registration_secret.setPlaceholderText(
-            "仅服务端限制注册时填写"
+        self.sync_device_name.setToolTip("用于在服务器上区分这台电脑或手机。")
+        advanced_form.addRow("设备名称", self.sync_device_name)
+        self.sync_account_id = QLineEdit(saved_account_id)
+        self.sync_account_id.setPlaceholderText("仅旧版令牌登录或故障恢复时填写")
+        self.sync_account_id.setAccessibleName("BanVerse 同步账户 ID")
+        advanced_form.addRow("账户 ID", self.sync_account_id)
+        self.sync_token = QLineEdit()
+        self.sync_token.setEchoMode(QLineEdit.EchoMode.Password)
+        sync_token = getattr(credentials, "get_sync_token", lambda: "")()
+        self.sync_token.setPlaceholderText(
+            "设备会话已安全保存" if sync_token else "仅旧版兼容登录时输入"
         )
-        sync_form.addRow("注册口令", self.sync_registration_secret)
+        self.sync_token.setAccessibleName("BanVerse 同步令牌")
+        self.sync_token.setToolTip(
+            "等同于设备登录凭据，请勿发布到 GitHub、聊天记录或截图中。"
+        )
+        advanced_form.addRow("同步令牌", self.sync_token)
         sync_actions = responsive_row_layout()
-        sync_save = QPushButton("保存并连接")
+        sync_save = QPushButton("使用 ID/令牌连接")
         sync_save.setObjectName("primaryButton")
         sync_save.clicked.connect(self._save_sync_settings)
-        sync_create = QPushButton("创建账户")
-        sync_create.clicked.connect(self._create_sync_account)
-        sync_now = QPushButton("立即同步")
-        sync_now.clicked.connect(self.sync_now_requested)
         sync_actions.addWidget(sync_save)
-        sync_actions.addWidget(sync_create)
-        sync_actions.addWidget(sync_now)
         sync_actions.addStretch(1)
-        sync_form.addRow("", sync_actions)
+        advanced_form.addRow("", sync_actions)
         sync_secondary_actions = responsive_row_layout()
-        sync_copy = QPushButton("复制配对信息")
+        sync_copy = QPushButton("复制设备配对信息")
         sync_copy.clicked.connect(self._copy_sync_pairing)
-        sync_import = QPushButton("从剪贴板导入配对")
+        sync_import = QPushButton("导入旧版配对信息")
         sync_import.clicked.connect(self._import_sync_pairing)
-        sync_disconnect = QPushButton("断开账户")
-        sync_disconnect.clicked.connect(self._disconnect_sync_account)
         sync_secondary_actions.addWidget(sync_copy)
         sync_secondary_actions.addWidget(sync_import)
-        sync_secondary_actions.addWidget(sync_disconnect)
         sync_secondary_actions.addStretch(1)
-        sync_form.addRow("", sync_secondary_actions)
+        advanced_form.addRow("兼容配对", sync_secondary_actions)
+        advanced_note = QLabel(
+            "通常无需使用账户 ID、令牌和配对 JSON；在另一台设备直接输入同一用户名和密码即可。"
+        )
+        advanced_note.setWordWrap(True)
+        advanced_note.setProperty("muted", True)
+        advanced_form.addRow("", advanced_note)
+        sync_form.addRow("", sync_advanced)
         last_sync = settings.get("sync_last_success_at", "")
         self.sync_status = QLabel(
             f"上次成功同步：{last_sync}"
@@ -1457,8 +1550,8 @@ class SettingsPage(QWidget):
         sync_form.addRow("状态", self.sync_status)
         sync_note = QLabel(
             f"本机 SQLite 始终是可离线使用的主数据副本。默认连接官方服务 {DEFAULT_SYNC_URL}；"
-            "官方账户需邀请注册，也可填写自托管 HTTPS 服务。账户令牌只在创建时返回一次，"
-            "可通过复制和导入配对信息安全转移到另一设备。"
+            "注册可能需要管理员提供的邀请码。首次在有完整聊天数据的设备注册并同步完成后，"
+            "再在另一端登录，可减少初次合并产生冲突的机会。"
         )
         sync_note.setWordWrap(True)
         sync_note.setProperty("muted", True)
@@ -2758,6 +2851,10 @@ class SettingsPage(QWidget):
             self.sync_token.setPlaceholderText(
                 "本次运行有效" if warning else "已安全保存"
             )
+        previous_account = self._settings.get("sync_account_id", "").strip()
+        if account_id and previous_account != account_id:
+            self.sync_link_reset_requested.emit()
+            self._settings.set("sync_username", "")
         self.sync_server_url.setText(server_url)
         self._settings.set("sync_server_url", server_url)
         self._settings.set("sync_account_id", account_id)
@@ -2771,10 +2868,100 @@ class SettingsPage(QWidget):
             "true" if self.sync_enabled.isChecked() else "false",
         )
         self.set_sync_status(warning or "同步设置已保存。")
+        self.set_sync_account(
+            {
+                "account_id": account_id,
+                "username": self._settings.get("sync_username", ""),
+            }
+        )
         self.sync_settings_changed.emit()
         if self.sync_enabled.isChecked():
             self.sync_now_requested.emit()
         return True
+
+    def _save_sync_connection_fields(self) -> str | None:
+        try:
+            server_url = normalize_sync_url(
+                self.sync_server_url.text() or DEFAULT_SYNC_URL
+            )
+        except ValueError as exc:
+            self.set_sync_status(str(exc))
+            return None
+        device_name = (
+            " ".join(self.sync_device_name.text().split())[:120]
+            or "BanVerse 设备"
+        )
+        self.sync_server_url.setText(server_url)
+        self.sync_device_name.setText(device_name)
+        self._settings.set("sync_server_url", server_url)
+        self._settings.set("sync_device_name", device_name)
+        return server_url
+
+    def _sync_login_values(self, *, confirm: bool) -> tuple[str, str] | None:
+        try:
+            username = normalize_sync_username(self.sync_username.text())
+            password = validate_sync_password(self.sync_password.text())
+        except ValueError as exc:
+            self.set_sync_status(str(exc))
+            return None
+        if confirm and password != self.sync_password_confirm.text():
+            self.set_sync_status("两次输入的密码不一致。")
+            return None
+        self.sync_username.setText(username)
+        return username, password
+
+    def _register_sync_account(self) -> None:
+        server_url = self._save_sync_connection_fields()
+        values = self._sync_login_values(confirm=True)
+        if server_url is None or values is None:
+            return
+        username, password = values
+        self.sync_register_requested.emit(
+            server_url,
+            username,
+            password,
+            self._settings.get("user_name", "用户"),
+            self.sync_registration_secret.text().strip(),
+        )
+        self._clear_sync_password_fields()
+        self.sync_registration_secret.clear()
+
+    def _login_sync_account(self) -> None:
+        server_url = self._save_sync_connection_fields()
+        values = self._sync_login_values(confirm=False)
+        if server_url is None or values is None:
+            return
+        username, password = values
+        self.sync_login_requested.emit(server_url, username, password)
+        self._clear_sync_password_fields()
+
+    def _upgrade_sync_account(self) -> None:
+        if not self._settings.get("sync_account_id", "").strip():
+            self.set_sync_status("当前没有可升级的旧版同步账户。")
+            return
+        values = self._sync_login_values(confirm=True)
+        if values is None:
+            return
+        username, password = values
+        if self._save_sync_connection_fields() is None:
+            return
+        self.sync_upgrade_requested.emit(
+            username, password, self._settings.get("user_name", "用户")
+        )
+        self._clear_sync_password_fields()
+
+    def _clear_sync_password_fields(self) -> None:
+        self.sync_password.clear()
+        self.sync_password_confirm.clear()
+
+    def _toggle_sync_password_visibility(self, visible: bool) -> None:
+        mode = (
+            QLineEdit.EchoMode.Normal
+            if visible
+            else QLineEdit.EchoMode.Password
+        )
+        self.sync_password.setEchoMode(mode)
+        self.sync_password_confirm.setEchoMode(mode)
 
     def _create_sync_account(self) -> None:
         try:
@@ -2811,6 +2998,9 @@ class SettingsPage(QWidget):
             "account_id": account_id,
             "token": token,
         }
+        username = self._settings.get("sync_username", "").strip()
+        if username:
+            payload["username"] = username
         QApplication.clipboard().setText(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         )
@@ -2829,26 +3019,57 @@ class SettingsPage(QWidget):
         self.sync_server_url.setText(pairing["server_url"])
         self.sync_account_id.setText(pairing["account_id"])
         self.sync_token.setText(pairing["token"])
+        self.sync_username.setText(pairing.get("username", ""))
         self.sync_enabled.setChecked(True)
         if not self._save_sync_settings():
             return
+        if pairing.get("username"):
+            self._settings.set("sync_username", pairing["username"])
         if clipboard.text() == raw:
             clipboard.clear()
+        self.set_sync_account(
+            {
+                "account_id": pairing["account_id"],
+                "username": pairing.get("username", ""),
+            }
+        )
         self.set_sync_status("配对信息导入成功，剪贴板中的令牌已清除。")
 
     def _disconnect_sync_account(self) -> None:
         self.sync_disconnect_requested.emit()
         if not self._settings.get("sync_account_id"):
             self.sync_account_id.clear()
+            self.sync_username.clear()
+            self.sync_account_state.setText("未登录")
             self.sync_token.clear()
-            self.sync_token.setPlaceholderText("输入同步令牌")
+            self.sync_token.setPlaceholderText("仅旧版兼容登录时输入")
             self.sync_enabled.setChecked(False)
+            self.sync_upgrade.setEnabled(False)
 
-    def set_sync_account(self, account_id: str) -> None:
+    def set_sync_account(self, account: object) -> None:
+        if isinstance(account, dict):
+            account_id = str(account.get("account_id", "")).strip()
+            username = str(account.get("username", "")).strip()
+        else:
+            account_id = str(account).strip()
+            username = self._settings.get("sync_username", "").strip()
         self.sync_account_id.setText(account_id)
+        self.sync_username.setText(username)
+        if not account_id:
+            self.sync_account_state.setText("未登录")
+            self.sync_token.setPlaceholderText("仅旧版兼容登录时输入")
+            self.sync_enabled.setChecked(False)
+            self.sync_upgrade.setEnabled(False)
+            return
+        self.sync_account_state.setText(
+            f"已登录：{username}"
+            if username
+            else "已连接旧版令牌账户，可升级为用户名登录"
+        )
         self.sync_token.clear()
-        self.sync_token.setPlaceholderText("已安全保存")
+        self.sync_token.setPlaceholderText("设备会话已安全保存")
         self.sync_enabled.setChecked(True)
+        self.sync_upgrade.setEnabled(not bool(username))
 
     def set_sync_status(self, text: str) -> None:
         self.sync_status.setText(text)

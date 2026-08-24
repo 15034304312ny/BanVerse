@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
@@ -19,6 +20,10 @@ MAX_SYNC_EVENTS = 200
 MAX_SYNC_PAYLOAD_BYTES = 2 * 1024 * 1024
 MAX_SYNC_MEDIA_BYTES = 50 * 1024 * 1024
 MAX_SYNC_PAIRING_CHARS = 4_096
+MIN_SYNC_USERNAME_CHARS = 3
+MAX_SYNC_USERNAME_CHARS = 32
+MIN_SYNC_PASSWORD_CHARS = 8
+MAX_SYNC_PASSWORD_CHARS = 128
 DEFAULT_SYNC_URL = "https://47.102.121.29"
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
@@ -50,6 +55,42 @@ def validate_identifier(value: str, label: str) -> str:
     if not _IDENTIFIER.fullmatch(candidate):
         raise ValueError(f"{label} 格式无效。")
     return candidate
+
+
+def normalize_sync_username(value: str) -> str:
+    """规范登录名，允许中英文、数字以及 ``._-``，并拒绝易混淆空白。"""
+
+    candidate = unicodedata.normalize("NFKC", str(value)).strip()
+    if not MIN_SYNC_USERNAME_CHARS <= len(candidate) <= MAX_SYNC_USERNAME_CHARS:
+        raise ValueError(
+            f"用户名长度需为 {MIN_SYNC_USERNAME_CHARS}–{MAX_SYNC_USERNAME_CHARS} 个字符。"
+        )
+    if not candidate[0].isalnum() or not candidate[-1].isalnum():
+        raise ValueError("用户名必须以中文、英文字母或数字开头和结尾。")
+    if any(not (character.isalnum() or character in "._-") for character in candidate):
+        raise ValueError("用户名只能包含中文、英文字母、数字、点、下划线和短横线。")
+    return candidate
+
+
+def sync_username_key(value: str) -> str:
+    """返回用于唯一索引和登录匹配的大小写不敏感用户名。"""
+
+    return normalize_sync_username(value).casefold()
+
+
+def validate_sync_password(value: str) -> str:
+    """限制密码长度和输入规模；密码原文不会被规范化或裁剪。"""
+
+    password = str(value)
+    if not MIN_SYNC_PASSWORD_CHARS <= len(password) <= MAX_SYNC_PASSWORD_CHARS:
+        raise ValueError(
+            f"密码长度需为 {MIN_SYNC_PASSWORD_CHARS}–{MAX_SYNC_PASSWORD_CHARS} 个字符。"
+        )
+    if not password.strip():
+        raise ValueError("密码不能只包含空白字符。")
+    if len(password.encode("utf-8")) > 512:
+        raise ValueError("密码内容过长。")
+    return password
 
 
 def validate_entity_id(value: str) -> str:
@@ -101,11 +142,15 @@ def parse_sync_pairing(value: str) -> dict[str, str]:
     account_id = str(payload.get("account_id", ""))
     token = str(payload.get("token", ""))
     bearer_credential(account_id, token)
-    return {
+    result = {
         "server_url": server_url,
         "account_id": account_id.strip(),
         "token": token.strip(),
     }
+    username = str(payload.get("username", "")).strip()
+    if username:
+        result["username"] = normalize_sync_username(username)
+    return result
 
 
 def validate_event(event: dict) -> dict:

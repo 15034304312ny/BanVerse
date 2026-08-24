@@ -13,6 +13,9 @@ class Credentials:
     def get_sync_token(self) -> str:
         return self.token
 
+    def save_sync_token(self, value: str) -> None:
+        self.token = value.strip()
+
     def clear_sync_token(self) -> None:
         self.token = ""
 
@@ -87,5 +90,45 @@ def test_enabled_controller_debounces_local_changes(tmp_path, qapp):
 
     assert controller._timer.interval() == 15_000
     assert controller._debounce_timer.isActive()
+    controller.shutdown()
+    database.close()
+
+
+def test_authenticated_account_switch_resets_link_and_keeps_local_data(
+    tmp_path, qapp
+):
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    conversation = chats.create_conversation(title="切换账号仍保留")
+    settings = SettingsRepository(database)
+    credentials = Credentials("old-token-123456")
+    settings.set("sync_account_id", "account-old-123")
+    settings.set("sync_username", "old-user")
+    controller = SyncController(
+        settings, credentials, database.path, tmp_path / "data", parent=qapp
+    )
+    SyncRepository(database).enable_capture()
+    authenticated = []
+    controller.account_authenticated.connect(authenticated.append)
+
+    controller._auth_completed(
+        {
+            "auth_action": "login",
+            "account_id": "account-new-456",
+            "token": "new-token-123456",
+            "username": "new-user",
+            "expires_at": 1234567890,
+        }
+    )
+
+    assert chats.get_conversation(conversation.id) is not None
+    assert settings.get("sync_account_id") == "account-new-456"
+    assert settings.get("sync_username") == "new-user"
+    assert settings.get_bool("sync_enabled") is True
+    assert credentials.token == "new-token-123456"
+    assert authenticated[-1]["username"] == "new-user"
+    assert database.connection.execute(
+        "SELECT capture_enabled FROM sync_runtime WHERE id = 1"
+    ).fetchone()[0] == 0
     controller.shutdown()
     database.close()

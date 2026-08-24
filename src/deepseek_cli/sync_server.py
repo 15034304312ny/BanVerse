@@ -23,11 +23,14 @@ from .sync_protocol import (
     MAX_SYNC_MEDIA_BYTES,
     MAX_SYNC_PAYLOAD_BYTES,
     SYNC_PROTOCOL_VERSION,
+    normalize_sync_username,
     split_bearer_credential,
+    sync_username_key,
     utc_now,
     validate_event,
     validate_identifier,
     validate_sha256,
+    validate_sync_password,
 )
 
 
@@ -35,12 +38,52 @@ class SyncAuthenticationError(RuntimeError):
     pass
 
 
+class SyncAccountExistsError(RuntimeError):
+    pass
+
+
+class SlidingWindowRateLimiter:
+    """适用于单进程自托管服务的轻量内存限流器。"""
+
+    def __init__(self) -> None:
+        self._attempts: dict[str, list[float]] = {}
+
+    def allow(self, key: str, *, limit: int, window_seconds: int) -> bool:
+        now = time.monotonic()
+        recent = [
+            attempt
+            for attempt in self._attempts.get(key, [])
+            if now - attempt < window_seconds
+        ]
+        if len(recent) >= limit:
+            self._attempts[key] = recent
+            return False
+        recent.append(now)
+        self._attempts[key] = recent
+        return True
+
+    def clear(self, key: str) -> None:
+        self._attempts.pop(key, None)
+
+
 class SyncServerStore:
     """SQLite 元数据与按账户隔离的内容寻址媒体存储。"""
 
-    def __init__(self, database_path: str | Path, media_root: str | Path) -> None:
+    def __init__(
+        self,
+        database_path: str | Path,
+        media_root: str | Path,
+        *,
+        session_days: int | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
         self.media_root = Path(media_root)
+        if session_days is None:
+            try:
+                session_days = int(os.environ.get("BANVERSE_SYNC_SESSION_DAYS", "180"))
+            except ValueError:
+                session_days = 180
+        self.session_seconds = max(1, min(int(session_days), 3650)) * 86_400
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.media_root.mkdir(parents=True, exist_ok=True)
         self._migrate()
@@ -133,10 +176,95 @@ class SyncServerStore:
                 );
                 """
             )
+            account_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(accounts)")
+            }
+            additions = {
+                "username": "TEXT",
+                "username_key": "TEXT",
+                "password_salt": "TEXT",
+                "password_hash": "TEXT",
+                "password_changed_at": "TEXT",
+                "legacy_enabled": "INTEGER NOT NULL DEFAULT 1",
+            }
+            for name, declaration in additions.items():
+                if name not in account_columns:
+                    connection.execute(
+                        f"ALTER TABLE accounts ADD COLUMN {name} {declaration}"
+                    )
+            connection.executescript(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_username_key
+                    ON accounts(username_key) WHERE username_key IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS account_sessions (
+                    account_id TEXT NOT NULL,
+                    token_hash TEXT NOT NULL,
+                    device_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    last_used_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    revoked_at TEXT,
+                    PRIMARY KEY(account_id, token_hash),
+                    FOREIGN KEY(account_id) REFERENCES accounts(id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_account_sessions_expiry
+                    ON account_sessions(expires_at);
+                """
+            )
 
     @staticmethod
     def _token_hash(account_id: str, token: str) -> str:
         return hashlib.sha256(f"{account_id}.{token}".encode()).hexdigest()
+
+    @staticmethod
+    def _password_hash(password: str, salt: bytes) -> str:
+        return hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=salt,
+            n=2**14,
+            r=8,
+            p=1,
+            dklen=32,
+        ).hex()
+
+    def _create_session(
+        self,
+        connection: sqlite3.Connection,
+        account_id: str,
+        *,
+        device_name: str = "",
+    ) -> dict[str, Any]:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        expires_at = now + self.session_seconds
+        connection.execute(
+            "DELETE FROM account_sessions WHERE expires_at <= ?", (now,)
+        )
+        connection.execute(
+            """INSERT INTO account_sessions(
+                   account_id, token_hash, device_name, created_at,
+                   last_used_at, expires_at, revoked_at
+               ) VALUES (?, ?, ?, ?, ?, ?, NULL)""",
+            (
+                account_id,
+                self._token_hash(account_id, token),
+                " ".join(device_name.split())[:120],
+                utc_now(),
+                now,
+                expires_at,
+            ),
+        )
+        return {"account_id": account_id, "token": token, "expires_at": expires_at}
+
+    @staticmethod
+    def _account_result(row: sqlite3.Row, session: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **session,
+            "username": str(row["username"] or ""),
+            "display_name": str(row["display_name"] or ""),
+        }
 
     def create_account(self, display_name: str = "") -> dict[str, str]:
         account_id = secrets.token_urlsafe(18)
@@ -154,19 +282,178 @@ class SyncServerStore:
             )
         return {"account_id": account_id, "token": token}
 
+    def register_account(
+        self,
+        username: str,
+        password: str,
+        display_name: str = "",
+        *,
+        device_name: str = "",
+    ) -> dict[str, Any]:
+        login_name = normalize_sync_username(username)
+        username_key = sync_username_key(login_name)
+        secret = validate_sync_password(password)
+        account_id = secrets.token_urlsafe(18)
+        salt = secrets.token_bytes(16)
+        legacy_token = secrets.token_urlsafe(32)
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """INSERT INTO accounts(
+                           id, token_hash, display_name, created_at, username,
+                           username_key, password_salt, password_hash,
+                           password_changed_at, legacy_enabled
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    (
+                        account_id,
+                        self._token_hash(account_id, legacy_token),
+                        " ".join(display_name.split())[:80],
+                        utc_now(),
+                        login_name,
+                        username_key,
+                        salt.hex(),
+                        self._password_hash(secret, salt),
+                        utc_now(),
+                    ),
+                )
+                session = self._create_session(
+                    connection, account_id, device_name=device_name
+                )
+                row = connection.execute(
+                    "SELECT * FROM accounts WHERE id = ?", (account_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise SyncAccountExistsError("该用户名已被注册。") from exc
+        return self._account_result(row, session)
+
+    def login_account(
+        self, username: str, password: str, *, device_name: str = ""
+    ) -> dict[str, Any]:
+        username_key = sync_username_key(username)
+        secret = validate_sync_password(password)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM accounts WHERE username_key = ?", (username_key,)
+            ).fetchone()
+            salt = bytes.fromhex(row["password_salt"]) if row else bytes(16)
+            supplied = self._password_hash(secret, salt)
+            expected = str(row["password_hash"] or "") if row else "0" * 64
+            if row is None or not hmac.compare_digest(supplied, expected):
+                raise SyncAuthenticationError("用户名或密码不正确。")
+            session = self._create_session(
+                connection, row["id"], device_name=device_name
+            )
+        return self._account_result(row, session)
+
+    def upgrade_account(
+        self,
+        account_id: str,
+        username: str,
+        password: str,
+        display_name: str = "",
+        *,
+        device_name: str = "",
+    ) -> dict[str, Any]:
+        login_name = normalize_sync_username(username)
+        username_key = sync_username_key(login_name)
+        secret = validate_sync_password(password)
+        salt = secrets.token_bytes(16)
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT * FROM accounts WHERE id = ?", (account_id,)
+                ).fetchone()
+                if row is None:
+                    raise SyncAuthenticationError("同步账户不存在。")
+                if row["username_key"]:
+                    raise ValueError("当前账户已经设置用户名，请直接登录。")
+                connection.execute(
+                    """UPDATE accounts SET username = ?, username_key = ?,
+                           password_salt = ?, password_hash = ?,
+                           password_changed_at = ?, display_name = ?,
+                           legacy_enabled = 0 WHERE id = ?""",
+                    (
+                        login_name,
+                        username_key,
+                        salt.hex(),
+                        self._password_hash(secret, salt),
+                        utc_now(),
+                        " ".join(display_name.split())[:80]
+                        or str(row["display_name"] or ""),
+                        account_id,
+                    ),
+                )
+                session = self._create_session(
+                    connection, account_id, device_name=device_name
+                )
+                row = connection.execute(
+                    "SELECT * FROM accounts WHERE id = ?", (account_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise SyncAccountExistsError("该用户名已被注册。") from exc
+        return self._account_result(row, session)
+
     def authenticate(self, credential: str) -> str:
         try:
             account_id, token = split_bearer_credential(credential)
         except ValueError as exc:
             raise SyncAuthenticationError("同步凭据无效。") from exc
+        token_hash = self._token_hash(account_id, token)
+        now = time.time()
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT token_hash FROM accounts WHERE id = ?", (account_id,)
+                "SELECT token_hash, legacy_enabled FROM accounts WHERE id = ?",
+                (account_id,),
             ).fetchone()
-        expected = self._token_hash(account_id, token)
-        if row is None or not hmac.compare_digest(row["token_hash"], expected):
-            raise SyncAuthenticationError("同步凭据无效。")
+            session = connection.execute(
+                """SELECT expires_at, last_used_at FROM account_sessions
+                   WHERE account_id = ? AND token_hash = ? AND revoked_at IS NULL""",
+                (account_id, token_hash),
+            ).fetchone()
+            if session is not None and float(session["expires_at"]) > now:
+                if now - float(session["last_used_at"]) >= 3_600:
+                    connection.execute(
+                        """UPDATE account_sessions SET last_used_at = ?
+                           WHERE account_id = ? AND token_hash = ?""",
+                        (now, account_id, token_hash),
+                    )
+                return account_id
+        legacy_matches = bool(
+            row
+            and row["legacy_enabled"]
+            and hmac.compare_digest(str(row["token_hash"]), token_hash)
+        )
+        if not legacy_matches:
+            raise SyncAuthenticationError("登录已失效，请重新登录。")
         return account_id
+
+    def account_profile(self, account_id: str) -> dict[str, str]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, username, display_name FROM accounts WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            raise SyncAuthenticationError("同步账户不存在。")
+        return {
+            "account_id": row["id"],
+            "username": str(row["username"] or ""),
+            "display_name": str(row["display_name"] or ""),
+        }
+
+    def logout(self, credential: str) -> dict[str, bool]:
+        account_id, token = split_bearer_credential(credential)
+        self.authenticate(credential)
+        token_hash = self._token_hash(account_id, token)
+        with self._connect() as connection:
+            result = connection.execute(
+                """UPDATE account_sessions SET revoked_at = ?
+                   WHERE account_id = ? AND token_hash = ? AND revoked_at IS NULL""",
+                (utc_now(), account_id, token_hash),
+            )
+        return {"revoked": result.rowcount > 0}
 
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -464,17 +751,37 @@ def create_app(
     registration_secret = os.environ.get(
         "BANVERSE_SYNC_REGISTRATION_SECRET", ""
     ).strip()
+    rate_limiter = SlidingWindowRateLimiter()
     app = FastAPI(title="BanVerse Sync", version=str(SYNC_PROTOCOL_VERSION))
     app.state.store = store
 
-    def account_from_request(request: Request) -> str:
+    def credential_from_request(request: Request) -> str:
         header = request.headers.get("authorization", "")
         if not header.lower().startswith("bearer "):
             raise HTTPException(status_code=401, detail="缺少同步凭据。")
+        return header[7:].strip()
+
+    def account_from_request(request: Request) -> str:
         try:
-            return store.authenticate(header[7:].strip())
+            return store.authenticate(credential_from_request(request))
         except SyncAuthenticationError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    def client_address(request: Request) -> str:
+        forwarded = request.headers.get("x-real-ip", "").strip()
+        if forwarded:
+            return forwarded[:80]
+        return str(request.client.host if request.client else "unknown")[:80]
+
+    def check_registration_access(request: Request) -> None:
+        rate_key = f"register:{client_address(request)}"
+        if not rate_limiter.allow(rate_key, limit=5, window_seconds=3_600):
+            raise HTTPException(status_code=429, detail="注册尝试过于频繁，请稍后再试。")
+        if registration_secret and not hmac.compare_digest(
+            request.headers.get("x-registration-secret", ""),
+            registration_secret,
+        ):
+            raise HTTPException(status_code=403, detail="邀请码不正确或注册未开放。")
 
     @app.get("/v1/health")
     async def health() -> dict[str, Any]:
@@ -482,15 +789,88 @@ def create_app(
             "status": "ok",
             "protocol": SYNC_PROTOCOL_VERSION,
             "server_version": __version__,
+            "password_auth": True,
+            "registration_requires_invite": bool(registration_secret),
         }
+
+    @app.post("/v1/auth/register")
+    async def register_account(request: Request) -> dict[str, Any]:
+        check_registration_access(request)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("请求格式无效。")
+            return store.register_account(
+                str(payload.get("username", "")),
+                str(payload.get("password", "")),
+                str(payload.get("display_name", "")),
+                device_name=str(payload.get("device_name", "")),
+            )
+        except SyncAccountExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/auth/login")
+    async def login_account(request: Request) -> dict[str, Any]:
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("请求格式无效。")
+            username = str(payload.get("username", ""))
+            rate_key = f"login:{client_address(request)}:{sync_username_key(username)}"
+            if not rate_limiter.allow(rate_key, limit=8, window_seconds=300):
+                raise HTTPException(
+                    status_code=429, detail="登录尝试过于频繁，请 5 分钟后再试。"
+                )
+            result = store.login_account(
+                username,
+                str(payload.get("password", "")),
+                device_name=str(payload.get("device_name", "")),
+            )
+        except SyncAuthenticationError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        except HTTPException:
+            raise
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        rate_limiter.clear(rate_key)
+        return result
+
+    @app.post("/v1/auth/upgrade")
+    async def upgrade_account(request: Request) -> dict[str, Any]:
+        account_id = account_from_request(request)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError("请求格式无效。")
+            return store.upgrade_account(
+                account_id,
+                str(payload.get("username", "")),
+                str(payload.get("password", "")),
+                str(payload.get("display_name", "")),
+                device_name=str(payload.get("device_name", "")),
+            )
+        except SyncAccountExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v1/auth/me")
+    async def account_profile(request: Request) -> dict[str, str]:
+        return store.account_profile(account_from_request(request))
+
+    @app.post("/v1/auth/logout")
+    async def logout_account(request: Request) -> dict[str, bool]:
+        credential = credential_from_request(request)
+        try:
+            return store.logout(credential)
+        except (SyncAuthenticationError, ValueError) as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
 
     @app.post("/v1/accounts")
     async def create_account(request: Request) -> dict[str, Any]:
-        if registration_secret and not hmac.compare_digest(
-            request.headers.get("x-registration-secret", ""),
-            registration_secret,
-        ):
-            raise HTTPException(status_code=403, detail="账户注册已受保护。")
+        check_registration_access(request)
         try:
             payload = await request.json()
         except (ValueError, json.JSONDecodeError):

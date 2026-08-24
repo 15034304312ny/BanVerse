@@ -265,13 +265,25 @@ class MainWindow(QMainWindow):
             self.settings_page.sync_account_create_requested.connect(
                 self._sync.create_account
             )
+            self.settings_page.sync_register_requested.connect(
+                self._sync.register_account
+            )
+            self.settings_page.sync_login_requested.connect(
+                self._sync.login_account
+            )
+            self.settings_page.sync_upgrade_requested.connect(
+                self._sync.upgrade_account
+            )
+            self.settings_page.sync_link_reset_requested.connect(
+                self._sync.reset_link_state
+            )
             self.settings_page.sync_disconnect_requested.connect(
                 self._sync.disconnect_account
             )
             self._sync.status_changed.connect(
                 self.settings_page.set_sync_status
             )
-            self._sync.account_created.connect(
+            self._sync.account_authenticated.connect(
                 self.settings_page.set_sync_account
             )
             self._sync.data_changed.connect(self._on_sync_data_changed)

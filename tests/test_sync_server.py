@@ -8,6 +8,7 @@ import pytest
 from deepseek_cli._version import __version__
 from deepseek_cli.sync_protocol import bearer_credential
 from deepseek_cli.sync_server import (
+    SyncAccountExistsError,
     SyncAuthenticationError,
     SyncServerStore,
     create_app,
@@ -117,6 +118,65 @@ def test_proactive_message_lease_allows_only_one_device(tmp_path):
     assert renewed["acquired"] is True
 
 
+def test_password_account_login_logout_and_legacy_upgrade(tmp_path):
+    store = SyncServerStore(
+        tmp_path / "auth.db", tmp_path / "auth-media", session_days=30
+    )
+    registered = store.register_account(
+        "BanVerse用户",
+        "safe-password-2026",
+        "测试用户",
+        device_name="电脑",
+    )
+    credential = bearer_credential(
+        registered["account_id"], registered["token"]
+    )
+
+    assert registered["username"] == "BanVerse用户"
+    assert registered["expires_at"] > 0
+    assert store.authenticate(credential) == registered["account_id"]
+    profile = store.account_profile(registered["account_id"])
+    assert profile["display_name"] == "测试用户"
+    with pytest.raises(SyncAccountExistsError):
+        store.register_account("banverse用户", "another-password")
+    with pytest.raises(SyncAuthenticationError, match="用户名或密码"):
+        store.login_account("BanVerse用户", "wrong-password")
+
+    logged_in = store.login_account(
+        "banverse用户", "safe-password-2026", device_name="手机"
+    )
+    login_credential = bearer_credential(
+        logged_in["account_id"], logged_in["token"]
+    )
+    assert store.authenticate(login_credential) == registered["account_id"]
+    assert store.logout(login_credential) == {"revoked": True}
+    with pytest.raises(SyncAuthenticationError, match="登录已失效"):
+        store.authenticate(login_credential)
+
+    legacy = store.create_account("旧版账户")
+    legacy_credential = bearer_credential(legacy["account_id"], legacy["token"])
+    upgraded = store.upgrade_account(
+        legacy["account_id"],
+        "旧账户用户",
+        "upgraded-password",
+        device_name="电脑",
+    )
+    assert upgraded["account_id"] == legacy["account_id"]
+    with pytest.raises(SyncAuthenticationError, match="登录已失效"):
+        store.authenticate(legacy_credential)
+    relogin = store.login_account("旧账户用户", "upgraded-password")
+    assert relogin["account_id"] == legacy["account_id"]
+
+    with store._connect() as connection:
+        row = connection.execute(
+            "SELECT password_hash, password_salt FROM accounts WHERE id = ?",
+            (registered["account_id"],),
+        ).fetchone()
+    assert row["password_hash"] != "safe-password-2026"
+    assert len(row["password_hash"]) == 64
+    assert len(row["password_salt"]) == 32
+
+
 def test_fastapi_health_account_and_authenticated_pull(tmp_path, monkeypatch):
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
@@ -139,7 +199,60 @@ def test_fastapi_health_account_and_authenticated_pull(tmp_path, monkeypatch):
     assert health.status_code == 200
     assert health.json()["protocol"] == 1
     assert health.json()["server_version"] == __version__
+    assert health.json()["password_auth"] is True
+    assert health.json()["registration_requires_invite"] is False
     assert account.status_code == 200
     assert unauthorized.status_code == 401
     assert pulled.status_code == 200
     assert pulled.json()["events"] == []
+
+
+def test_fastapi_password_registration_login_profile_and_logout(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("BANVERSE_SYNC_REGISTRATION_SECRET", "invite-2026")
+    app = create_app(tmp_path / "auth-http.db", tmp_path / "auth-http-media")
+    with TestClient(app) as client:
+        denied = client.post(
+            "/v1/auth/register",
+            json={"username": "用户一号", "password": "password-2026"},
+        )
+        registered = client.post(
+            "/v1/auth/register",
+            headers={"X-Registration-Secret": "invite-2026"},
+            json={
+                "username": "用户一号",
+                "password": "password-2026",
+                "display_name": "用户",
+                "device_name": "电脑",
+            },
+        )
+        bad_login = client.post(
+            "/v1/auth/login",
+            json={"username": "用户一号", "password": "wrong-pass"},
+        )
+        logged_in = client.post(
+            "/v1/auth/login",
+            json={"username": "用户一号", "password": "password-2026"},
+        )
+        body = logged_in.json()
+        auth = {
+            "Authorization": (
+                f"Bearer {bearer_credential(body['account_id'], body['token'])}"
+            )
+        }
+        profile = client.get("/v1/auth/me", headers=auth)
+        logged_out = client.post("/v1/auth/logout", headers=auth, json={})
+        expired = client.get("/v1/auth/me", headers=auth)
+
+    assert denied.status_code == 403
+    assert registered.status_code == 200
+    assert bad_login.status_code == 401
+    assert logged_in.status_code == 200
+    assert profile.json()["username"] == "用户一号"
+    assert logged_out.json() == {"revoked": True}
+    assert expired.status_code == 401

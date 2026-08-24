@@ -74,8 +74,81 @@ class SyncHttpClient:
             timeout=timeout,
         )
 
+    @staticmethod
+    def register_account(
+        base_url: str,
+        username: str,
+        password: str,
+        *,
+        display_name: str = "",
+        device_name: str = "",
+        registration_secret: str = "",
+        timeout: float = 20,
+    ) -> dict:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if registration_secret.strip():
+            headers["X-Registration-Secret"] = registration_secret.strip()
+        return SyncHttpClient._request_json_static(
+            normalize_sync_url(base_url) + "/v1/auth/register",
+            method="POST",
+            payload={
+                "username": username,
+                "password": password,
+                "display_name": display_name,
+                "device_name": device_name,
+            },
+            headers=headers,
+            timeout=timeout,
+        )
+
+    @staticmethod
+    def login_account(
+        base_url: str,
+        username: str,
+        password: str,
+        *,
+        device_name: str = "",
+        timeout: float = 20,
+    ) -> dict:
+        return SyncHttpClient._request_json_static(
+            normalize_sync_url(base_url) + "/v1/auth/login",
+            method="POST",
+            payload={
+                "username": username,
+                "password": password,
+                "device_name": device_name,
+            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=timeout,
+        )
+
     def health(self) -> dict:
         return self._request_json("/v1/health", authenticated=False)
+
+    def profile(self) -> dict:
+        return self._request_json("/v1/auth/me")
+
+    def upgrade_account(
+        self,
+        username: str,
+        password: str,
+        *,
+        display_name: str = "",
+        device_name: str = "",
+    ) -> dict:
+        return self._request_json(
+            "/v1/auth/upgrade",
+            method="POST",
+            payload={
+                "username": username,
+                "password": password,
+                "display_name": display_name,
+                "device_name": device_name,
+            },
+        )
+
+    def logout(self) -> dict:
+        return self._request_json("/v1/auth/logout", method="POST", payload={})
 
     def push(self, device_id: str, device_name: str, events: list[dict]) -> dict:
         return self._request_json(

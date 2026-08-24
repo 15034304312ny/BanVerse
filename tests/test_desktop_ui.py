@@ -486,10 +486,20 @@ def test_sync_settings_save_pairing_and_account_creation_signals(tmp_path, qtbot
     changed = []
     sync_now = []
     account_requests = []
+    register_requests = []
+    login_requests = []
+    upgrade_requests = []
     page.sync_settings_changed.connect(lambda: changed.append(True))
     page.sync_now_requested.connect(lambda: sync_now.append(True))
     page.sync_account_create_requested.connect(
         lambda *args: account_requests.append(args)
+    )
+    page.sync_register_requested.connect(
+        lambda *args: register_requests.append(args)
+    )
+    page.sync_login_requested.connect(lambda *args: login_requests.append(args))
+    page.sync_upgrade_requested.connect(
+        lambda *args: upgrade_requests.append(args)
     )
 
     page.sync_server_url.setText("https://sync.example.test/")
@@ -540,6 +550,45 @@ def test_sync_settings_save_pairing_and_account_creation_signals(tmp_path, qtbot
         ("https://official-sync.example.test", "用户", "registration-secret")
     ]
     assert page.sync_registration_secret.text() == ""
+
+    page.sync_username.setText("BanVerse用户")
+    page.sync_password.setText("safe-password-2026")
+    page.sync_password_confirm.setText("safe-password-2026")
+    page.sync_registration_secret.setText("invite-code")
+    page._register_sync_account()
+    assert register_requests == [
+        (
+            "https://official-sync.example.test",
+            "BanVerse用户",
+            "safe-password-2026",
+            "用户",
+            "invite-code",
+        )
+    ]
+    assert page.sync_password.text() == ""
+    assert page.sync_registration_secret.text() == ""
+
+    page.sync_password.setText("safe-password-2026")
+    page._login_sync_account()
+    assert login_requests == [
+        (
+            "https://official-sync.example.test",
+            "BanVerse用户",
+            "safe-password-2026",
+        )
+    ]
+
+    page.sync_password.setText("upgraded-password")
+    page.sync_password_confirm.setText("upgraded-password")
+    page._upgrade_sync_account()
+    assert upgrade_requests == [
+        ("BanVerse用户", "upgraded-password", "用户")
+    ]
+    page.set_sync_account(
+        {"account_id": "account-87654321", "username": "BanVerse用户"}
+    )
+    assert page.sync_account_state.text() == "已登录：BanVerse用户"
+    assert not page.sync_upgrade.isEnabled()
     database.close()
 
 
