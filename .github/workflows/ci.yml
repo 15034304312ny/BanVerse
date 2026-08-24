@@ -16,7 +16,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: python -m pip install -e ".[dev,desktop]"
+        run: python -m pip install -e ".[dev,desktop,sync-server]"
 
       - name: Ruff lint
         run: python -m ruff check src tests packaging

@@ -175,6 +175,7 @@ def main() -> int:
             SettingsRepository,
         )
         from .security.credentials import CredentialStore
+        from .sync_controller import SyncController
         from .ui.main_window import MainWindow
 
         database = Database(data_root / "chat.db")
@@ -182,6 +183,13 @@ def main() -> int:
         characters = CharacterRepository(database)
         settings = SettingsRepository(database)
         credentials = CredentialStore()
+        sync_controller = SyncController(
+            settings,
+            credentials,
+            database.path,
+            data_root,
+            parent=application,
+        )
         builtins = BuiltinCharacterManager(
             database,
             characters,
@@ -199,6 +207,7 @@ def main() -> int:
             notification_sound=None,
             media_root=data_root,
             background_jobs_enabled=not smoke_test,
+            sync_controller=sync_controller,
         )
         application.aboutToQuit.connect(window.shutdown)
         if android:
@@ -206,6 +215,7 @@ def main() -> int:
         else:
             window.show()
         if not smoke_test:
+            sync_controller.start()
             QTimer.singleShot(
                 350,
                 lambda: _initialize_optional_audio(

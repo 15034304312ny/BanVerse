@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from collections import Counter
 from datetime import datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -34,6 +36,12 @@ from ....grsai_gateway import (
     normalize_grsai_base_url,
 )
 from ....model_catalog import MODEL_CHAT, text_provider_models
+from ....sync_protocol import (
+    DEFAULT_SYNC_URL,
+    bearer_credential,
+    normalize_sync_url,
+    parse_sync_pairing,
+)
 from ...data.repositories import SettingsRepository
 from ...image_service import (
     DEFAULT_GRSAI_IMAGE_MODEL,
@@ -216,6 +224,10 @@ class SettingsPage(QWidget):
     proactive_settings_changed = Signal()
     character_discovery_settings_changed = Signal()
     notification_sound_preview_requested = Signal()
+    sync_settings_changed = Signal()
+    sync_now_requested = Signal()
+    sync_account_create_requested = Signal(str, str, str)
+    sync_disconnect_requested = Signal()
 
     def __init__(
         self,
@@ -1374,10 +1386,92 @@ class SettingsPage(QWidget):
         appearance_form.addRow("", proactive_note)
         layout.addWidget(appearance)
 
+        sync_group = QGroupBox("双端消息同步")
+        sync_form = QFormLayout(sync_group)
+        configure_mobile_form(sync_form)
+        self.sync_enabled = QCheckBox("在此设备启用本地优先同步")
+        self.sync_enabled.setChecked(settings.get_bool("sync_enabled", False))
+        sync_form.addRow("同步", self.sync_enabled)
+        self.sync_server_url = QLineEdit(
+            settings.get("sync_server_url", DEFAULT_SYNC_URL)
+        )
+        self.sync_server_url.setPlaceholderText(DEFAULT_SYNC_URL)
+        self.sync_server_url.setAccessibleName("BanVerse 同步服务地址")
+        sync_form.addRow("服务地址", self.sync_server_url)
+        self.sync_account_id = QLineEdit(settings.get("sync_account_id", ""))
+        self.sync_account_id.setPlaceholderText("在另一端输入相同账户 ID")
+        self.sync_account_id.setAccessibleName("BanVerse 同步账户 ID")
+        sync_form.addRow("账户 ID", self.sync_account_id)
+        self.sync_token = QLineEdit()
+        self.sync_token.setEchoMode(QLineEdit.EchoMode.Password)
+        sync_token = getattr(credentials, "get_sync_token", lambda: "")()
+        self.sync_token.setPlaceholderText(
+            "已安全保存" if sync_token else "输入同步令牌"
+        )
+        self.sync_token.setAccessibleName("BanVerse 同步令牌")
+        sync_form.addRow("同步令牌", self.sync_token)
+        self.sync_device_name = QLineEdit(
+            settings.get("sync_device_name", "BanVerse 设备")
+        )
+        self.sync_device_name.setMaxLength(120)
+        sync_form.addRow("设备名称", self.sync_device_name)
+        self.sync_registration_secret = QLineEdit()
+        self.sync_registration_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.sync_registration_secret.setPlaceholderText(
+            "仅服务端限制注册时填写"
+        )
+        sync_form.addRow("注册口令", self.sync_registration_secret)
+        sync_actions = responsive_row_layout()
+        sync_save = QPushButton("保存并连接")
+        sync_save.setObjectName("primaryButton")
+        sync_save.clicked.connect(self._save_sync_settings)
+        sync_create = QPushButton("创建账户")
+        sync_create.clicked.connect(self._create_sync_account)
+        sync_now = QPushButton("立即同步")
+        sync_now.clicked.connect(self.sync_now_requested)
+        sync_actions.addWidget(sync_save)
+        sync_actions.addWidget(sync_create)
+        sync_actions.addWidget(sync_now)
+        sync_actions.addStretch(1)
+        sync_form.addRow("", sync_actions)
+        sync_secondary_actions = responsive_row_layout()
+        sync_copy = QPushButton("复制配对信息")
+        sync_copy.clicked.connect(self._copy_sync_pairing)
+        sync_import = QPushButton("从剪贴板导入配对")
+        sync_import.clicked.connect(self._import_sync_pairing)
+        sync_disconnect = QPushButton("断开账户")
+        sync_disconnect.clicked.connect(self._disconnect_sync_account)
+        sync_secondary_actions.addWidget(sync_copy)
+        sync_secondary_actions.addWidget(sync_import)
+        sync_secondary_actions.addWidget(sync_disconnect)
+        sync_secondary_actions.addStretch(1)
+        sync_form.addRow("", sync_secondary_actions)
+        last_sync = settings.get("sync_last_success_at", "")
+        self.sync_status = QLabel(
+            f"上次成功同步：{last_sync}"
+            if last_sync
+            else "消息、角色卡、头像和聊天图片会增量同步；API Key 与 TTS 缓存不会上传。"
+        )
+        self.sync_status.setWordWrap(True)
+        self.sync_status.setProperty("muted", True)
+        sync_form.addRow("状态", self.sync_status)
+        sync_note = QLabel(
+            f"本机 SQLite 始终是可离线使用的主数据副本。默认连接官方服务 {DEFAULT_SYNC_URL}；"
+            "官方账户需邀请注册，也可填写自托管 HTTPS 服务。账户令牌只在创建时返回一次，"
+            "可通过复制和导入配对信息安全转移到另一设备。"
+        )
+        sync_note.setWordWrap(True)
+        sync_note.setProperty("muted", True)
+        sync_form.addRow("", sync_note)
+        layout.addWidget(sync_group)
+
         privacy = QGroupBox("数据与隐私")
         privacy_layout = QVBoxLayout(privacy)
         note = QLabel(
             "会话保存在本机应用数据目录；发送的内容会传输到当前文本平台。"
+            "启用双端同步后，角色卡、会话、消息和相关图片还会传输到你配置的"
+            "同步服务；当前同步协议不提供端到端加密，因此公开部署必须使用 HTTPS，"
+            "并由你自行保护服务端数据库、媒体目录和备份。API Key 不参与同步。"
             "用户图片会发送到当前图片平台生成画面描述，"
             "启用角色自主发图后，角色回复会在本机分类为对白、旁白和发图事件；"
             "只有发图事件的绘图提示词会发送到当前图片平台并立即下载返回图片。"
@@ -2622,6 +2716,142 @@ class SettingsPage(QWidget):
             "role_memory_enabled",
             "true" if self.role_memory_enabled.isChecked() else "false",
         )
+
+    def _save_sync_settings(self, *_args) -> bool:
+        try:
+            server_url = normalize_sync_url(
+                self.sync_server_url.text() or DEFAULT_SYNC_URL
+            )
+        except ValueError as exc:
+            self.set_sync_status(str(exc))
+            return False
+        account_id = self.sync_account_id.text().strip()
+        token = self.sync_token.text().strip()
+        existing_token = getattr(
+            self._credentials, "get_sync_token", lambda: ""
+        )()
+        if self.sync_enabled.isChecked() and (
+            not account_id or not (token or existing_token)
+        ):
+            self.set_sync_status("启用同步前需要填写账户 ID 和同步令牌。")
+            return False
+        if self.sync_enabled.isChecked():
+            try:
+                bearer_credential(account_id, token or existing_token)
+            except ValueError as exc:
+                self.set_sync_status(str(exc))
+                return False
+        warning = ""
+        if token:
+            save = getattr(self._credentials, "save_sync_token", None)
+            if not callable(save):
+                self.set_sync_status("当前凭据存储不支持同步令牌。")
+                return False
+            try:
+                save(token)
+            except ValueError as exc:
+                self.set_sync_status(str(exc))
+                return False
+            except RuntimeError as exc:
+                warning = str(exc)
+            self.sync_token.clear()
+            self.sync_token.setPlaceholderText(
+                "本次运行有效" if warning else "已安全保存"
+            )
+        self.sync_server_url.setText(server_url)
+        self._settings.set("sync_server_url", server_url)
+        self._settings.set("sync_account_id", account_id)
+        self._settings.set(
+            "sync_device_name",
+            " ".join(self.sync_device_name.text().split())[:120]
+            or "BanVerse 设备",
+        )
+        self._settings.set(
+            "sync_enabled",
+            "true" if self.sync_enabled.isChecked() else "false",
+        )
+        self.set_sync_status(warning or "同步设置已保存。")
+        self.sync_settings_changed.emit()
+        if self.sync_enabled.isChecked():
+            self.sync_now_requested.emit()
+        return True
+
+    def _create_sync_account(self) -> None:
+        try:
+            server_url = normalize_sync_url(
+                self.sync_server_url.text() or DEFAULT_SYNC_URL
+            )
+        except ValueError as exc:
+            self.set_sync_status(str(exc))
+            return
+        self.sync_server_url.setText(server_url)
+        self._settings.set("sync_server_url", server_url)
+        self._settings.set(
+            "sync_device_name",
+            " ".join(self.sync_device_name.text().split())[:120]
+            or "BanVerse 设备",
+        )
+        self.sync_account_create_requested.emit(
+            server_url,
+            self._settings.get("user_name", "用户"),
+            self.sync_registration_secret.text().strip(),
+        )
+        self.sync_registration_secret.clear()
+
+    def _copy_sync_pairing(self) -> None:
+        account_id = self._settings.get("sync_account_id", "").strip()
+        token = getattr(self._credentials, "get_sync_token", lambda: "")().strip()
+        if not account_id or not token:
+            self.set_sync_status("尚无可复制的同步账户凭据。")
+            return
+        payload = {
+            "server_url": self._settings.get(
+                "sync_server_url", DEFAULT_SYNC_URL
+            ),
+            "account_id": account_id,
+            "token": token,
+        }
+        QApplication.clipboard().setText(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        )
+        self.set_sync_status(
+            "配对信息已复制；其中包含账户令牌，请只发送到你自己的另一台设备。"
+        )
+
+    def _import_sync_pairing(self) -> None:
+        clipboard = QApplication.clipboard()
+        raw = clipboard.text()
+        try:
+            pairing = parse_sync_pairing(raw)
+        except ValueError as exc:
+            self.set_sync_status(str(exc))
+            return
+        self.sync_server_url.setText(pairing["server_url"])
+        self.sync_account_id.setText(pairing["account_id"])
+        self.sync_token.setText(pairing["token"])
+        self.sync_enabled.setChecked(True)
+        if not self._save_sync_settings():
+            return
+        if clipboard.text() == raw:
+            clipboard.clear()
+        self.set_sync_status("配对信息导入成功，剪贴板中的令牌已清除。")
+
+    def _disconnect_sync_account(self) -> None:
+        self.sync_disconnect_requested.emit()
+        if not self._settings.get("sync_account_id"):
+            self.sync_account_id.clear()
+            self.sync_token.clear()
+            self.sync_token.setPlaceholderText("输入同步令牌")
+            self.sync_enabled.setChecked(False)
+
+    def set_sync_account(self, account_id: str) -> None:
+        self.sync_account_id.setText(account_id)
+        self.sync_token.clear()
+        self.sync_token.setPlaceholderText("已安全保存")
+        self.sync_enabled.setChecked(True)
+
+    def set_sync_status(self, text: str) -> None:
+        self.sync_status.setText(text)
 
     def _theme_selected(self, index: int) -> None:
         value = self.theme.itemData(index)

@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class Database:
@@ -37,6 +37,8 @@ class Database:
             self._migrate_v6()
         if version < 7:
             self._migrate_v7()
+        if version < 8:
+            self._migrate_v8()
 
     def _migrate_v1(self) -> None:
         with self.connection:
@@ -193,7 +195,155 @@ class Database:
                     """ALTER TABLE turns ADD COLUMN
                        assistant_segments_json TEXT NOT NULL DEFAULT '[]'"""
                 )
-            self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            self.connection.execute("PRAGMA user_version = 7")
+
+    def _migrate_v8(self) -> None:
+        """加入本地优先同步所需的增量队列、游标和触发器。
+
+        捕获默认关闭；用户完成同步账户配置时才会建立一次本地快照并
+        开始记录后续变化。远端事件落库期间通过 ``suppress_outbox``
+        阻止触发器产生同步回声。
+        """
+
+        with self.connection:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS sync_runtime (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    capture_enabled INTEGER NOT NULL DEFAULT 0,
+                    suppress_outbox INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO sync_runtime(
+                    id, capture_enabled, suppress_outbox
+                ) VALUES (1, 0, 0);
+
+                CREATE TABLE IF NOT EXISTS sync_outbox (
+                    event_id TEXT PRIMARY KEY,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    operation TEXT NOT NULL CHECK (
+                        operation IN ('upsert', 'delete')
+                    ),
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sync_outbox_entity
+                    ON sync_outbox(entity_type, entity_id);
+
+                CREATE TABLE IF NOT EXISTS sync_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sync_entities (
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    server_revision INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(entity_type, entity_id)
+                );
+                CREATE TABLE IF NOT EXISTS sync_conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    local_event_json TEXT NOT NULL,
+                    server_event_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    resolved INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TRIGGER IF NOT EXISTS sync_conversations_insert
+                AFTER INSERT ON conversations
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'conversation', NEW.id,
+                        'upsert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS sync_conversations_update
+                AFTER UPDATE ON conversations
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'conversation', NEW.id,
+                        'upsert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS sync_conversations_delete
+                AFTER DELETE ON conversations
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'conversation', OLD.id,
+                        'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS sync_turns_insert
+                AFTER INSERT ON turns
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'turn', NEW.id,
+                        'upsert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS sync_turns_update
+                AFTER UPDATE ON turns
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'turn', NEW.id,
+                        'upsert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS sync_turns_delete
+                AFTER DELETE ON turns
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'turn', OLD.id,
+                        'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS sync_characters_insert
+                AFTER INSERT ON characters
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'character', NEW.id,
+                        'upsert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS sync_characters_update
+                AFTER UPDATE ON characters
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'character', NEW.id,
+                        'upsert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS sync_characters_delete
+                AFTER DELETE ON characters
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'character', OLD.id,
+                        'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                PRAGMA user_version = 8;
+                """
+            )
 
     @contextmanager
     def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:

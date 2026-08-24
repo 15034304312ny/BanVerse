@@ -13,6 +13,7 @@ from deepseek_cli.desktop.security.credentials import (
     SILICONFLOW_ACCOUNT_NAME,
     SILICONFLOW_IMAGE_ACCOUNT_NAME,
     SILICONFLOW_TTS_ACCOUNT_NAME,
+    SYNC_TOKEN_ACCOUNT_NAME,
     XFYUN_TTS_API_KEY_ACCOUNT_NAME,
     XFYUN_TTS_API_SECRET_ACCOUNT_NAME,
     XFYUN_TTS_PASSWORD_ACCOUNT_NAME,
@@ -39,6 +40,7 @@ class FakeKeyring:
             XFYUN_TTS_API_KEY_ACCOUNT_NAME,
             XFYUN_TTS_API_SECRET_ACCOUNT_NAME,
             XFYUN_TTS_PASSWORD_ACCOUNT_NAME,
+            SYNC_TOKEN_ACCOUNT_NAME,
         }
         return self.values.get(account)
 
@@ -56,6 +58,7 @@ class FakeKeyring:
             XFYUN_TTS_API_KEY_ACCOUNT_NAME,
             XFYUN_TTS_API_SECRET_ACCOUNT_NAME,
             XFYUN_TTS_PASSWORD_ACCOUNT_NAME,
+            SYNC_TOKEN_ACCOUNT_NAME,
         }
         self.values[account] = value
 
@@ -73,6 +76,7 @@ class FakeKeyring:
             XFYUN_TTS_API_KEY_ACCOUNT_NAME,
             XFYUN_TTS_API_SECRET_ACCOUNT_NAME,
             XFYUN_TTS_PASSWORD_ACCOUNT_NAME,
+            SYNC_TOKEN_ACCOUNT_NAME,
         }
         self.values.pop(account, None)
 
@@ -118,6 +122,11 @@ def test_credentials_save_and_clear():
     assert store.get_siliconflow_image_api_key() == ""
     assert store.get_grsai_image_api_key() == ""
     assert store.get_siliconflow_tts_api_key() == ""
+
+    store.save_sync_token(" pairing-token ")
+    assert store.get_sync_token() == "pairing-token"
+    store.clear_sync_token()
+    assert store.get_sync_token() == ""
 
 
 def test_legacy_siliconflow_key_migrates_by_read_fallback():

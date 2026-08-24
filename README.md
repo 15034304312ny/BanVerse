@@ -41,6 +41,7 @@ BanVerse 不内置任何第三方平台的 API Key。首次运行后，至少需
 - **角色自主发图**：关键词、本地事件和 AI 语义判断并行决定是否发图；生成提示会结合角色设定、上下文和当前时段。
 - **只朗读真正的台词**：动作、旁白和思考过程不进入 TTS；角色音色可跟随角色卡独立配置。
 - **本地优先的数据管理**：会话、角色、摘要、图片和设置保存在设备本地，凭据不写入聊天数据库或源码。
+- **电脑与 Android 双端同步**：连接官方或自托管同步服务后，角色、会话、消息和图片会增量同步；离线仍可聊天，恢复网络后自动收敛。
 
 ## 核心功能
 
@@ -69,6 +70,17 @@ BanVerse 不内置任何第三方平台的 API Key。首次运行后，至少需
 - 支持免费 Edge TTS / Android 系统 TTS、硅基流动 TTS、科大讯飞超拟人 TTS，以及 Windows 本地 IndexTTS2 声音克隆。
 - 角色卡可以保存独立音色、IndexTTS2 预设和情感基调。
 - 主动消息和随机新联系人均默认关闭，启用后只在应用运行时触发，并会产生相应 API 调用。
+
+### 双端消息同步
+
+- Windows 与 Android 都保留本地 SQLite 完整副本；消息变化后约 1.2 秒合并并同步，后台每 15 秒兜底检查，也可手动立即同步。
+- 同步角色卡、会话、消息、摘要、头像和聊天图片；不同步任何 AI/TTS API Key 或 TTS 缓存。
+- 图片按 SHA-256 校验并去重；删除可跨端传播；并发修改会保留冲突记录，主动消息租约可避免双端重复发送。
+- 默认服务地址为 `https://47.102.121.29`，官方账户采用邀请注册；也可以改用自己的 HTTPS 同步服务。
+- 一台设备复制配对信息后，另一台可直接从剪贴板导入，导入成功会自动清除剪贴板中的令牌。
+- 当前协议不提供端到端加密，官方或自托管服务管理员可以读取同步内容；敏感会话请勿启用同步。
+
+部署服务和双端配对步骤见 [双端同步指南](docs/SYNC_SERVER.md)。
 
 ## AI 平台配置
 
@@ -118,10 +130,12 @@ http://127.0.0.1:7861
 ## 数据与隐私
 
 - Windows API Key 优先写入系统凭据管理器；Android 写入应用私有设置目录。
+- 同步令牌同样写入凭据存储，不进入聊天数据库；角色、消息和图片会发送到用户配置的同步服务。
 - 聊天 SQLite、角色、媒体和缓存位于 Qt `QStandardPaths.AppDataLocation` 对应目录，不位于源码目录。
 - 用户发送的文本、图片描述和所选角色台词会按功能发送到当前配置的第三方 AI/TTS 平台。
 - 思考过程、动作和旁白不会发送给 TTS；本地 IndexTTS2 请求不会离开回环地址。
 - 清空或卸载应用前请自行备份重要会话与角色卡。Windows 卸载程序默认保留用户数据。
+- 当前同步协议不是端到端加密；官方或自托管服务管理员可以读取同步内容，公网部署必须使用 HTTPS。
 
 请阅读并遵守 DeepSeek、GRS AI、硅基流动和科大讯飞各自的服务条款与隐私政策。不要提交真实 API Key、聊天数据库或个人媒体到 Issue、Pull Request 或公开仓库。
 
@@ -156,6 +170,14 @@ $env:DEEPSEEK_API_KEY = "你的 API Key"
 ```
 
 CLI 支持 `/help`、`/clear`、`/model`、`/model chat`、`/model reasoner` 和 `/exit`。
+
+如需运行自托管同步服务，额外安装 `sync-server` 依赖并参阅
+[双端同步指南](docs/SYNC_SERVER.md)：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[sync-server]"
+.\.venv\Scripts\banverse-sync-server.exe
+```
 
 ## 测试
 
@@ -211,10 +233,19 @@ src/deepseek_cli/             CLI、模型网关与桌面/Android 应用
   desktop/                    UI、数据库、角色、图片、TTS 与后台任务
   desktop/resources/          图标、提示音、内置角色卡和头像
 tests/                        单元测试与 UI/工作流测试
+docs/SYNC_SERVER.md           自托管同步服务、HTTPS、配对与备份说明
 packaging/                    Windows、PyInstaller、Inno Setup 构建脚本
 packaging/android/            Android 构建、Java 桥接与真机测试工具
 .github/workflows/ci.yml      GitHub Actions 持续集成
 ```
+
+## 1.3.0 更新
+
+- 正式启用 Windows 与 Android 双端消息同步，默认连接 BanVerse HTTPS 同步服务，并保留自托管入口。
+- 增加“从剪贴板导入配对”，校验服务地址、账户和令牌后保存，成功时立即清空敏感剪贴板内容。
+- 消息、角色、摘要和图片落库后会触发 1.2 秒合并同步，并以 15 秒轮询兜底；离线修改恢复联网后自动收敛。
+- 同步角色卡、头像、会话、文本与聊天图片，支持跨端删除、冲突保留和主动消息租约；API Key 与 TTS 缓存始终不上传。
+- 增加正式服务器版本健康信息和公网双客户端发布验证脚本。
 
 ## 1.2.3 更新
 

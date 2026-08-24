@@ -15,6 +15,8 @@ Principal runtime components include:
 | websocket-client | Apache-2.0 | <https://github.com/websocket-client/websocket-client> |
 | certifi | MPL-2.0 | <https://github.com/certifi/python-certifi> |
 | aiohttp and its runtime dependencies | Apache-2.0, MIT, BSD, or other permissive licenses by component | <https://github.com/aio-libs/aiohttp> |
+| FastAPI (optional sync server) | MIT | <https://github.com/fastapi/fastapi> |
+| Uvicorn (optional sync server) | BSD-3-Clause | <https://github.com/encode/uvicorn> |
 
 The corresponding package distributions include their complete license texts.
 Source distributions and installation environments should retain those files.

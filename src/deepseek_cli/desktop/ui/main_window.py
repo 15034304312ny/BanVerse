@@ -84,6 +84,7 @@ from .pages.settings_page import SettingsPage
 
 if TYPE_CHECKING:
     from ..notification_sound import NotificationSound
+    from ..sync_controller import SyncController
     from ..tts import SpeechController
 
 
@@ -101,6 +102,7 @@ class MainWindow(QMainWindow):
         notification_sound: NotificationSound | None = None,
         media_root: str | Path | None = None,
         background_jobs_enabled: bool = True,
+        sync_controller: SyncController | None = None,
     ) -> None:
         super().__init__()
         self._chats = chats
@@ -111,6 +113,7 @@ class MainWindow(QMainWindow):
         self._image_service_factory = image_service_factory
         self._media_root = media_root
         self._background_jobs_enabled = background_jobs_enabled
+        self._sync = sync_controller
         self._speech: SpeechController | None = None
         self._notification_sound: NotificationSound | None = None
         self._shutting_down = False
@@ -256,6 +259,25 @@ class MainWindow(QMainWindow):
         self.settings_page.notification_sound_preview_requested.connect(
             lambda: self._play_notification(force=True)
         )
+        if self._sync is not None:
+            self.settings_page.sync_settings_changed.connect(self._sync.reload)
+            self.settings_page.sync_now_requested.connect(self._sync.sync_now)
+            self.settings_page.sync_account_create_requested.connect(
+                self._sync.create_account
+            )
+            self.settings_page.sync_disconnect_requested.connect(
+                self._sync.disconnect_account
+            )
+            self._sync.status_changed.connect(
+                self.settings_page.set_sync_status
+            )
+            self._sync.account_created.connect(
+                self.settings_page.set_sync_account
+            )
+            self._sync.data_changed.connect(self._on_sync_data_changed)
+            self._sync.proactive_claimed.connect(
+                self._on_proactive_claimed
+            )
         self._proactive.due.connect(self._send_proactive_message)
         self._character_discovery.due.connect(self._generate_random_character)
         self.set_audio_services(
@@ -279,9 +301,7 @@ class MainWindow(QMainWindow):
             settings=self._settings,
             create_text_service=self._create_text_service,
             text_api_key=self._text_api_key,
-            refresh=lambda: self.conversations.refresh(
-                select_id=self._conversation_id
-            ),
+            refresh=self._on_summary_refreshed,
             parent=self,
         )
         self._character_discovery_runner = CharacterDiscoveryRunner(
@@ -448,6 +468,7 @@ class MainWindow(QMainWindow):
             or self.settings_page.default_model.currentData()
         )
         conversation = self._chats.create_conversation(model)
+        self._schedule_sync()
         self.conversations.refresh(select_id=conversation.id)
         self._show_messages()
         # refresh 为避免重复加载会屏蔽列表选择信号；必须显式打开新会话，
@@ -481,6 +502,7 @@ class MainWindow(QMainWindow):
             character_id=character.id,
             opening_message=opening,
         )
+        self._schedule_sync()
         # 首条开场改由 AI 主动生成；模板（first_mes）仅作为兜底。load 时先
         # 不显示模板，AI 开场成功则清空模板，失败/无 key 则回退显示模板。
         self._pending_opening_conversation_id = conversation.id
@@ -491,6 +513,7 @@ class MainWindow(QMainWindow):
         self._send_ai_opening(conversation, opening)
 
     def _characters_changed(self) -> None:
+        self._schedule_sync()
         current = self._conversation_id
         self.conversations.refresh(select_id=current)
         if current:
@@ -612,6 +635,7 @@ class MainWindow(QMainWindow):
             user_sticker=sticker.id if sticker is not None else "",
         )
         self._chats.mark_streaming(turn.id)
+        self._schedule_sync()
         self.chat_page.add_user_message(
             text,
             image_path,
@@ -788,6 +812,7 @@ class MainWindow(QMainWindow):
     def _on_autonomous_image_saved(self, conversation_id: str) -> None:
         """发图成功后的主窗口侧 UI 动作。"""
 
+        self._schedule_sync()
         self.conversations.refresh(select_id=self._conversation_id)
         if (
             conversation_id == self._conversation_id
@@ -813,6 +838,7 @@ class MainWindow(QMainWindow):
             self._chats.set_user_image_description(turn_id, description)
         except ValueError:
             return
+        self._schedule_sync()
 
     def _on_turn_completed(
         self,
@@ -843,6 +869,7 @@ class MainWindow(QMainWindow):
             self._pending_opening_conversation_id = None
             self._opening_fallbacks.pop(conversation_id, "")
             self._chats.set_opening_message(conversation_id, "")
+        self._schedule_sync()
         self._enqueue_summary(conversation_id, visible_answer)
         conversation = self._chats.get_conversation(conversation_id)
         character = (
@@ -910,6 +937,7 @@ class MainWindow(QMainWindow):
             self._chats.fail_turn(turn_id, "failed", error_code)
         else:
             self._chats.fail_turn(turn_id, "cancelled")
+        self._schedule_sync()
 
     def _on_stream_cleaned_up(
         self,
@@ -1062,6 +1090,7 @@ class MainWindow(QMainWindow):
             character_id=character.id,
             opening_message=opening,
         )
+        self._schedule_sync()
         self._character_discovery.record_generated()
         self._settings.set("character_discovery_last_error", "")
         self._settings.set("character_discovery_last_name", character.name)
@@ -1131,6 +1160,7 @@ class MainWindow(QMainWindow):
                 Path(avatar_path).unlink(missing_ok=True)
             return
         self._characters.update(character.id, character.card, avatar_path)
+        self._schedule_sync()
         self._settings.set("character_discovery_avatar_last_error", "")
         self._settings.set(
             "character_discovery_avatar_last_name", character.name
@@ -1158,10 +1188,30 @@ class MainWindow(QMainWindow):
             self._conversation_id is None
         ):
             return
+        if self._sync is not None and self._sync.enabled:
+            self._sync.claim_proactive(self._conversation_id)
+            return
+        self._begin_proactive_message(self._conversation_id)
+
+    def _on_proactive_claimed(
+        self, conversation_id: str, acquired: bool
+    ) -> None:
+        if acquired:
+            self._begin_proactive_message(conversation_id)
+
+    def _begin_proactive_message(self, conversation_id: str) -> None:
+        """租约确认后生成主动消息；切换会话或管线占线时放弃。"""
+
+        if (
+            not conversation_id
+            or conversation_id != self._conversation_id
+            or (self._flow is not None and self._flow.busy)
+        ):
+            return
         api_key = self._text_api_key()
         if not api_key:
             return
-        conversation = self._chats.get_conversation(self._conversation_id)
+        conversation = self._chats.get_conversation(conversation_id)
         if conversation is None or not conversation.character_id:
             return
         character = self._characters.get(conversation.character_id)
@@ -1185,6 +1235,7 @@ class MainWindow(QMainWindow):
             conversation.id, conversation.model
         )
         self._chats.mark_streaming(turn.id)
+        self._schedule_sync()
         self.chat_page.add_assistant_stream()
         self.chat_page.set_generating(True)
         system_prompt = "\n\n".join(
@@ -1211,6 +1262,25 @@ class MainWindow(QMainWindow):
             conversation_id=conversation.id,
             request_kind="proactive",
         )
+
+    def _on_sync_data_changed(self) -> None:
+        """远端增量落库后刷新列表；生成期间不重载当前气泡。"""
+
+        if self._shutting_down:
+            return
+        self.characters_page.refresh()
+        self.conversations.refresh(select_id=self._conversation_id)
+        if self._busy_generating():
+            return
+        if self._conversation_id and self._chats.get_conversation(
+            self._conversation_id
+        ):
+            self._open_conversation(self._conversation_id, force_reload=True)
+            return
+        conversations = self._chats.list_conversations()
+        if conversations:
+            self.conversations.select(conversations[0].id)
+            self._open_conversation(conversations[0].id, force_reload=True)
 
     def _send_ai_opening(
         self,
@@ -1253,6 +1323,7 @@ class MainWindow(QMainWindow):
             conversation.id, conversation.model
         )
         self._chats.mark_streaming(turn.id)
+        self._schedule_sync()
         self.chat_page.add_assistant_stream()
         self.chat_page.set_generating(True)
         system_prompt = "\n\n".join(
@@ -1288,12 +1359,21 @@ class MainWindow(QMainWindow):
         self._pending_opening_conversation_id = None
         self._opening_fallbacks.pop(conversation_id, "")
         self._ensure_opening_fallback(conversation_id, fallback)
+        self._schedule_sync()
         if conversation_id == self._conversation_id:
             self._open_conversation(conversation_id, force_reload=True)
 
     def _enqueue_summary(self, conversation_id: str, answer: str) -> None:
         if self._summary_runner is not None:
             self._summary_runner.enqueue(conversation_id, answer)
+
+    def _on_summary_refreshed(self) -> None:
+        self.conversations.refresh(select_id=self._conversation_id)
+        self._schedule_sync()
+
+    def _schedule_sync(self) -> None:
+        if self._sync is not None:
+            self._sync.schedule_sync()
 
     def _enqueue_pending_summaries(self) -> None:
         if self._summary_runner is not None:
@@ -1355,6 +1435,7 @@ class MainWindow(QMainWindow):
     def _change_model(self, model: str) -> None:
         if self._conversation_id:
             self._chats.set_model(self._conversation_id, model)
+            self._schedule_sync()
             self.conversations.refresh(select_id=self._conversation_id)
 
     def _edit_current(self) -> None:
@@ -1381,6 +1462,7 @@ class MainWindow(QMainWindow):
         self._chats.bind_character(
             conversation.id, dialog.character.currentData()
         )
+        self._schedule_sync()
         self.conversations.refresh(select_id=conversation.id)
         self._open_conversation(conversation.id, force_reload=True)
 
@@ -1400,6 +1482,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._chats.delete_conversation(self._conversation_id)
+        self._schedule_sync()
         self._conversation_id = None
         self.conversations.refresh()
         remaining = self._chats.list_conversations()
@@ -1422,6 +1505,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._chats.clear_all()
+        self._schedule_sync()
         self._conversation_id = None
         self.conversations.refresh()
         self._new_conversation()
@@ -1470,6 +1554,8 @@ class MainWindow(QMainWindow):
             self._character_avatar_runner.shutdown()
         if self._image_runner is not None:
             self._image_runner.shutdown()
+        if self._sync is not None:
+            self._sync.shutdown()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.shutdown()

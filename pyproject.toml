@@ -30,11 +30,15 @@ dev = [
     "pyinstaller>=6.0",
     "ruff>=0.6",
 ]
+sync-server = [
+    "fastapi[standard]>=0.115,<1",
+]
 
 [project.scripts]
 deepseek-cli = "deepseek_cli.cli:main"
 deepseek-app = "deepseek_cli.desktop.main:main"
 banverse = "deepseek_cli.desktop.main:main"
+banverse-sync-server = "deepseek_cli.sync_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+
 from PySide6.QtCore import QCoreApplication, QPointF, Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QImage, QScrollEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QFormLayout,
     QLabel,
@@ -461,6 +464,82 @@ def test_settings_separates_text_image_and_tts_providers(tmp_path, qtbot):
     assert page._settings.get("character_discovery_enabled") == "true"
     assert "新联系人会话" in labels
     assert "伴界 BanVerse" in labels
+    database.close()
+
+
+def test_sync_settings_save_pairing_and_account_creation_signals(tmp_path, qtbot):
+    class Credentials:
+        token = ""
+        get_api_key = staticmethod(lambda: "")
+
+        def get_sync_token(self):
+            return self.token
+
+        def save_sync_token(self, value):
+            self.token = value
+
+    credentials = Credentials()
+    database = Database(tmp_path / "sync-settings.db")
+    settings = SettingsRepository(database)
+    page = SettingsPage(settings, credentials)
+    qtbot.addWidget(page)
+    changed = []
+    sync_now = []
+    account_requests = []
+    page.sync_settings_changed.connect(lambda: changed.append(True))
+    page.sync_now_requested.connect(lambda: sync_now.append(True))
+    page.sync_account_create_requested.connect(
+        lambda *args: account_requests.append(args)
+    )
+
+    page.sync_server_url.setText("https://sync.example.test/")
+    page.sync_account_id.setText("account-123456")
+    page.sync_token.setText("token-12345678")
+    page.sync_device_name.setText("  我的 Android 手机  ")
+    page.sync_enabled.setChecked(True)
+
+    assert page._save_sync_settings() is True
+    assert settings.get("sync_server_url") == "https://sync.example.test"
+    assert settings.get("sync_account_id") == "account-123456"
+    assert settings.get("sync_device_name") == "我的 Android 手机"
+    assert settings.get_bool("sync_enabled") is True
+    assert credentials.token == "token-12345678"
+    assert changed == [True]
+    assert sync_now == [True]
+
+    page._copy_sync_pairing()
+    pairing = json.loads(QApplication.clipboard().text())
+    assert pairing == {
+        "server_url": "https://sync.example.test",
+        "account_id": "account-123456",
+        "token": "token-12345678",
+    }
+
+    QApplication.clipboard().setText("not-json")
+    page._import_sync_pairing()
+    assert "不是有效的 JSON" in page.sync_status.text()
+
+    imported = {
+        "server_url": "https://official-sync.example.test/",
+        "account_id": "account-87654321",
+        "token": "token-87654321",
+    }
+    QApplication.clipboard().setText(json.dumps(imported))
+    page._import_sync_pairing()
+    assert QApplication.clipboard().text() == ""
+    assert settings.get("sync_server_url") == "https://official-sync.example.test"
+    assert settings.get("sync_account_id") == "account-87654321"
+    assert credentials.token == "token-87654321"
+    assert changed == [True, True]
+    assert sync_now == [True, True]
+    assert "剪贴板中的令牌已清除" in page.sync_status.text()
+
+    page.sync_registration_secret.setText("registration-secret")
+    page._create_sync_account()
+    assert account_requests == [
+        ("https://official-sync.example.test", "用户", "registration-secret")
+    ]
+    assert page.sync_registration_secret.text() == ""
     database.close()
 
 

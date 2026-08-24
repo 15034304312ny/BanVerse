@@ -20,6 +20,7 @@ SILICONFLOW_TTS_ACCOUNT_NAME = "siliconflow-tts-api-key"
 XFYUN_TTS_PASSWORD_ACCOUNT_NAME = "xfyun-super-tts-api-password"
 XFYUN_TTS_API_KEY_ACCOUNT_NAME = "xfyun-super-tts-api-key"
 XFYUN_TTS_API_SECRET_ACCOUNT_NAME = "xfyun-super-tts-api-secret"
+SYNC_TOKEN_ACCOUNT_NAME = "banverse-sync-token"
 
 
 class QtSettingsCredentialBackend:
@@ -96,6 +97,9 @@ class CredentialStore:
     def get_xfyun_tts_api_secret(self) -> str:
         return self._get(XFYUN_TTS_API_SECRET_ACCOUNT_NAME)
 
+    def get_sync_token(self) -> str:
+        return self._get(SYNC_TOKEN_ACCOUNT_NAME)
+
     def _get(self, account: str) -> str:
         try:
             value = self._backend.get_password(SERVICE_NAME, account)
@@ -135,6 +139,9 @@ class CredentialStore:
 
     def save_xfyun_tts_api_secret(self, value: str) -> None:
         self._save(XFYUN_TTS_API_SECRET_ACCOUNT_NAME, value)
+
+    def save_sync_token(self, value: str) -> None:
+        self._save(SYNC_TOKEN_ACCOUNT_NAME, value)
 
     def _save(self, account: str, api_key: str) -> None:
         value = api_key.strip()
@@ -183,6 +190,9 @@ class CredentialStore:
 
     def clear_xfyun_tts_api_secret(self) -> None:
         self._clear(XFYUN_TTS_API_SECRET_ACCOUNT_NAME)
+
+    def clear_sync_token(self) -> None:
+        self._clear(SYNC_TOKEN_ACCOUNT_NAME)
 
     def _clear(self, account: str) -> None:
         self._session_keys.pop(account, None)

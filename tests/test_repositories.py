@@ -26,7 +26,7 @@ def test_database_migrates_summary_media_and_sticker_columns(tmp_path):
         for row in database.connection.execute("PRAGMA table_info(turns)")
     }
 
-    assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 8
     assert {
         "ai_summary",
         "summary_status",
@@ -40,6 +40,30 @@ def test_database_migrates_summary_media_and_sticker_columns(tmp_path):
         "assistant_segments_json",
         "user_sticker",
     } <= turn_columns
+    sync_tables = {
+        row["name"]
+        for row in database.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    sync_triggers = {
+        row["name"]
+        for row in database.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        )
+    }
+    assert {
+        "sync_runtime",
+        "sync_outbox",
+        "sync_state",
+        "sync_entities",
+        "sync_conflicts",
+    } <= sync_tables
+    assert {
+        "sync_conversations_insert",
+        "sync_turns_update",
+        "sync_characters_delete",
+    } <= sync_triggers
     database.close()
 
 
@@ -82,7 +106,7 @@ def test_existing_v2_database_is_upgraded_without_losing_conversations(tmp_path)
     ).fetchone()
 
     assert tuple(row) == ("旧会话", "", "none")
-    assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 8
     database.close()
 
 
