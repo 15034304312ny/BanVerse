@@ -16,6 +16,7 @@ from deepseek_cli.desktop.data.repositories import (
     ChatRepository,
     SettingsRepository,
 )
+from deepseek_cli.desktop.model_discovery import ProviderModel, serialize_models
 from deepseek_cli.desktop.ui.main_window import MainWindow
 from deepseek_cli.gateway import Message, StreamDelta
 
@@ -385,6 +386,39 @@ def test_main_window_routes_all_text_workflows_to_selected_grsai(
         "GRS AI · gemini-text-test"
     )
     assert window.windowTitle() == "伴界 BanVerse"
+
+    window.close()
+    database.close()
+
+
+def test_grsai_roleplay_sampling_uses_actual_cached_model_capability(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("text_provider", "grsai")
+    settings.set("grsai_text_model", "reasoning-chat")
+    settings.set(
+        "model_catalog_grsai",
+        serialize_models(
+            (
+                ProviderModel(
+                    "grsai",
+                    "reasoning-chat",
+                    ("chat", "reasoning"),
+                ),
+            )
+        ),
+    )
+    chats.create_conversation()
+    window = MainWindow(chats, characters, settings, FakeCredentials())
+    qtbot.addWidget(window)
+
+    assert window._text_model_supports_reasoning("deepseek-v4-flash")
+    settings.set("grsai_text_model", "uncached-chat")
+    assert not window._text_model_supports_reasoning("deepseek-v4-flash")
 
     window.close()
     database.close()

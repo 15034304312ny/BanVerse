@@ -94,6 +94,40 @@ def test_service_forwards_roleplay_options():
     assert captured["temperature"] == 1.3
 
 
+def test_service_places_character_post_history_instruction_nearest_user_turn():
+    captured = {}
+
+    class ConfigurableGateway:
+        def stream_chat(self, model, messages, **options):
+            captured["model"] = model
+            captured["messages"] = list(messages)
+            captured["options"] = options
+            yield StreamDelta(content="角色回复")
+
+    events = list(
+        ChatStreamService(ConfigurableGateway).stream(
+            MODEL_CHAT,
+            [Message("user", "最近消息"), Message("assistant", "最近回复")],
+            "当前消息",
+            example_messages=(
+                Message("user", "示例消息"),
+                Message("assistant", "示例回复"),
+            ),
+            post_history_prompt="临近角色指令",
+        )
+    )
+
+    assert events[-1].type is ChatEventType.COMPLETED
+    assert captured["messages"] == [
+        Message("user", "示例消息"),
+        Message("assistant", "示例回复"),
+        Message("user", "最近消息"),
+        Message("assistant", "最近回复"),
+        Message("system", "临近角色指令"),
+        Message("user", "当前消息"),
+    ]
+
+
 def test_service_honors_cancellation():
     cancel = Event()
 

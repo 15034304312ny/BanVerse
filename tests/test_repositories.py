@@ -290,6 +290,32 @@ def test_role_state_is_stored_separately_from_messages(tmp_path):
     database.close()
 
 
+def test_role_state_optimistic_write_does_not_overwrite_newer_state(tmp_path):
+    database = Database(tmp_path / "chat.db")
+    repository = ChatRepository(database)
+    conversation = repository.create_conversation()
+    repository.set_role_state(conversation.id, {"open_threads": ["旧话题"]})
+    expected = repository.get_conversation(conversation.id).role_state_json
+
+    repository.set_role_state(conversation.id, {"open_threads": ["新话题"]})
+    assert not repository.set_role_state_if_unchanged(
+        conversation.id,
+        {"open_threads": ["过期任务结果"]},
+        expected_json=expected,
+    )
+    current = repository.get_conversation(conversation.id).role_state_json
+    assert "新话题" in current
+    assert repository.set_role_state_if_unchanged(
+        conversation.id,
+        {"open_threads": ["更新成功"]},
+        expected_json=current,
+    )
+    assert "更新成功" in repository.get_conversation(
+        conversation.id
+    ).role_state_json
+    database.close()
+
+
 def test_proactive_turn_is_assistant_only_in_model_history(tmp_path):
     database = Database(tmp_path / "chat.db")
     repository = ChatRepository(database)
@@ -304,8 +330,43 @@ def test_proactive_turn_is_assistant_only_in_model_history(tmp_path):
         Message("assistant", "今天想聊聊你最近在做的事。")
     ]
     assert repository.pending_summary_jobs() == [
-        (conversation.id, "今天想聊聊你最近在做的事。")
+        (conversation.id, proactive.id, "今天想聊聊你最近在做的事。")
     ]
+    database.close()
+
+
+def test_recalled_memories_find_relevant_older_turn_outside_recent_window(
+    tmp_path,
+):
+    database = Database(tmp_path / "chat.db")
+    repository = ChatRepository(database)
+    conversation = repository.create_conversation()
+    old_turn = repository.create_turn(
+        conversation.id,
+        "还记得蓝鲸书店门口那把黄色雨伞吗？",
+        MODEL_CHAT,
+    )
+    repository.complete_turn(old_turn.id, "记得，我们撑着它走过了两条街。")
+    for index in range(12):
+        turn = repository.create_turn(
+            conversation.id, f"普通近况消息{index}", MODEL_CHAT
+        )
+        repository.complete_turn(turn.id, f"普通近况回复{index}")
+
+    memories = repository.recalled_memories(
+        conversation.id,
+        "蓝鲸书店的黄色雨伞后来放在哪里了？",
+        exclude_recent_turns=12,
+    )
+
+    assert len(memories) == 1
+    assert "蓝鲸书店" in memories[0]
+    assert "黄色雨伞" in memories[0]
+    assert not repository.recalled_memories(
+        conversation.id,
+        "量子火箭的推进器",
+        exclude_recent_turns=12,
+    )
     database.close()
 
 

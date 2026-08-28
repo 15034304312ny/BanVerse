@@ -199,24 +199,34 @@ def test_role_memory_request_and_parser_keep_bounded_structured_state():
         '{"scene":{"location":"地铁"}}',
         "今天想安静一下",
         "好，我先去上班，不追问你。",
+        turn_id="turn-42",
     )
 
     assert "上一版连续性状态" in request
     assert "今天想安静一下" in request
+    assert "turn-42" in request
     result = parse_role_postprocess(
         '```json\n{"summary":"小满尊重用户想安静的边界",'
         '"role_state":{"scene":{"location":"地铁","time":"早晨",'
-        '"ongoing_action":"去上班"},"character_state":{"mood":"关心",'
-        '"current_desire":"给用户空间"},"relationship":{"stage":"熟悉",'
-        '"preferred_address":"你","boundaries":["不追问"]},'
+        '"ongoing_action":"去上班"},"emotion":{"primary":"担心",'
+        '"secondary":"克制","cause":"用户想安静","intensity":125,'
+        '"inertia":62},"character_state":{"mood":"关心",'
+        '"current_desire":"给用户空间","current_goal":"不打扰"},'
+        '"relationship":{"stage":"熟悉","preferred_address":"你",'
+        '"trust":58,"intimacy":-4,"tension":11,"recent_change":"尊重边界",'
+        '"boundaries":["不追问"]},'
         '"user_facts":["今天想安静"],"shared_memories":[],'
         '"open_threads":["下班后再聊"],'
-        '"recent_patterns":["轻声收尾","A","B","C","D","E","应被截断"]}}\n```'
+        '"recent_patterns":["轻声收尾","A","B","C","D","E","应被截断"]}}\n```',
+        processed_turn_id="turn-42",
     )
 
     assert result.summary == "小满尊重用户想安静的边界"
     assert result.role_state["scene"]["location"] == "地铁"
     assert result.role_state["relationship"]["boundaries"] == ["不追问"]
+    assert result.role_state["emotion"]["intensity"] == 100
+    assert result.role_state["relationship"]["intimacy"] == 0
+    assert result.role_state["last_processed_turn_id"] == "turn-42"
     assert len(result.role_state["recent_patterns"]) == 6
     assert not parse_role_postprocess("不是 JSON").summary
 
@@ -307,6 +317,23 @@ def test_role_reply_is_split_and_classified_without_showing_image_action():
         serialize_reply_segments(plan.segments)
     )
     assert restored == plan.segments
+
+
+def test_role_reply_preserves_natural_paragraphs_and_complete_quoted_sentence():
+    answer = (
+        "我刚才一直记得你说的那句“先让我自己想一会儿”，所以没有追问。\n\n"
+        "现在雨小了一点。我把窗开了条缝，屋里终于没那么闷了。"
+    )
+
+    plan = classify_role_reply(answer)
+
+    assert [segment.kind for segment in plan.segments] == [
+        "dialogue",
+        "dialogue",
+    ]
+    assert plan.segments[0].text.endswith("所以没有追问。")
+    assert "先让我自己想一会儿" in plan.segments[0].text
+    assert plan.segments[1].text.startswith("现在雨小了一点。")
 
 
 def test_role_image_prompt_includes_stable_character_context():

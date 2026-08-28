@@ -46,6 +46,7 @@ class ChatStreamService:
         cancel_event: Event | None = None,
         system_prompt: str = "",
         example_messages: Sequence[Message] = (),
+        post_history_prompt: str = "",
         temperature: float | None = None,
     ) -> Iterable[ChatEvent]:
         resolved_model = resolve_model(model)
@@ -60,8 +61,12 @@ class ChatStreamService:
         request_messages = [
             *example_messages,
             *history,
-            Message(role="user", content=text),
         ]
+        if post_history_prompt.strip():
+            request_messages.append(
+                Message(role="system", content=post_history_prompt.strip())
+            )
+        request_messages.append(Message(role="user", content=text))
         answer_parts: list[str] = []
         stream = None
         try:

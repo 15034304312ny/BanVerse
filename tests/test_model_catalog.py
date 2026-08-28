@@ -1,6 +1,7 @@
 from deepseek_cli.model_catalog import (
     MODEL_CHAT,
     MODEL_REASONER,
+    model_supports_reasoning,
     resolve_model,
     resolve_provider_model,
     text_provider_models,
@@ -43,3 +44,10 @@ def test_text_provider_models_show_the_actual_requested_model_ids():
     assert len(grsai_models) == 1
     assert grsai_models[0].id == MODEL_CHAT
     assert grsai_models[0].label == "GRS AI · gemini-3.1-flash-lite"
+
+
+def test_reasoning_capability_is_resolved_from_catalog_and_aliases():
+    assert model_supports_reasoning(MODEL_REASONER)
+    assert model_supports_reasoning("reasoner")
+    assert not model_supports_reasoning(MODEL_CHAT)
+    assert not model_supports_reasoning("unknown-model")

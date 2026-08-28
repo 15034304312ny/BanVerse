@@ -57,6 +57,7 @@ class ChatWorker(QObject):
         *,
         system_prompt: str = "",
         example_messages: Sequence[Message] = (),
+        post_history_prompt: str = "",
         temperature: float | None = None,
         image_service=None,
         image_path: str = "",
@@ -68,6 +69,7 @@ class ChatWorker(QObject):
         self._user_text = user_text
         self._system_prompt = system_prompt
         self._example_messages = list(example_messages)
+        self._post_history_prompt = post_history_prompt
         self._temperature = temperature
         self._image_service = image_service
         self._image_path = image_path
@@ -96,6 +98,7 @@ class ChatWorker(QObject):
                 cancel_event=self._cancel_event,
                 system_prompt=self._system_prompt,
                 example_messages=self._example_messages,
+                post_history_prompt=self._post_history_prompt,
                 temperature=self._temperature,
             ):
                 if event.type is ChatEventType.REASONING:

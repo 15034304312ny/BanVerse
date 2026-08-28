@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -20,6 +21,48 @@ def _now() -> str:
 def _title(text: str, limit: int = 24) -> str:
     normalized = " ".join(text.split())
     return normalized if len(normalized) <= limit else f"{normalized[:limit]}…"
+
+
+_MEMORY_STOP_TERMS = {
+    "什么",
+    "怎么",
+    "这个",
+    "那个",
+    "今天",
+    "现在",
+    "已经",
+    "还是",
+    "可以",
+    "一下",
+    "一个",
+    "我们",
+    "你们",
+    "他们",
+    "真的",
+    "没有",
+}
+
+
+def _memory_terms(text: str) -> set[str]:
+    """提取适合中文本地召回的受控二元词和字母数字词。"""
+
+    source = " ".join(str(text or "").lower().split())[:4_000]
+    terms = {
+        item
+        for item in re.findall(r"[a-z0-9_\-]{2,}", source)
+        if item not in _MEMORY_STOP_TERMS
+    }
+    for block in re.findall(r"[\u3400-\u9fff]{2,}", source):
+        if block not in _MEMORY_STOP_TERMS and len(block) <= 8:
+            terms.add(block)
+        for size in (2, 3):
+            for index in range(max(0, len(block) - size + 1)):
+                item = block[index : index + size]
+                if item not in _MEMORY_STOP_TERMS:
+                    terms.add(item)
+                if len(terms) >= 180:
+                    return terms
+    return terms
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,6 +463,26 @@ class ChatRepository:
                 (value, conversation_id),
             )
 
+    def set_role_state_if_unchanged(
+        self,
+        conversation_id: str,
+        state: dict,
+        *,
+        expected_json: str,
+    ) -> bool:
+        """乐观写入连续性状态，避免异步旧任务覆盖同步得到的新状态。"""
+
+        value = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+        if len(value) > 12_000:
+            raise ValueError("角色连续性状态过大")
+        with self._db:
+            cursor = self._db.execute(
+                """UPDATE conversations SET role_state_json = ?
+                   WHERE id = ? AND role_state_json = ?""",
+                (value, conversation_id, expected_json or "{}"),
+            )
+        return cursor.rowcount == 1
+
     def mark_summary_failed(self, conversation_id: str) -> None:
         with self._db:
             self._db.execute(
@@ -430,9 +493,10 @@ class ChatRepository:
                 (conversation_id,),
             )
 
-    def pending_summary_jobs(self) -> list[tuple[str, str]]:
+    def pending_summary_jobs(self) -> list[tuple[str, str, str]]:
         rows = self._db.execute(
-            """SELECT c.id AS conversation_id, t.assistant_content
+            """SELECT c.id AS conversation_id, t.id AS turn_id,
+                      t.assistant_content
                FROM conversations c
                JOIN turns t ON t.id = (
                    SELECT latest.id FROM turns latest
@@ -446,7 +510,12 @@ class ChatRepository:
                ORDER BY c.updated_at"""
         )
         return [
-            (row["conversation_id"], row["assistant_content"]) for row in rows
+            (
+                row["conversation_id"],
+                row["turn_id"],
+                row["assistant_content"],
+            )
+            for row in rows
         ]
 
     def delete_turn(self, turn_id: str) -> None:
@@ -552,6 +621,10 @@ class ChatRepository:
         ).fetchone()
         return row["user_content"] if row else ""
 
+    def latest_completed_turn(self, conversation_id: str) -> Turn | None:
+        turns = self._completed_turns(conversation_id, max_turns=1)
+        return turns[0] if turns else None
+
     def completed_history(
         self, conversation_id: str, *, max_turns: int | None = None
     ) -> list[Message]:
@@ -585,6 +658,65 @@ class ChatRepository:
             if assistant_parts:
                 history.append(Message("assistant", "\n\n".join(assistant_parts)))
         return history
+
+    def recalled_memories(
+        self,
+        conversation_id: str,
+        query: str,
+        *,
+        exclude_recent_turns: int = 12,
+        max_items: int = 4,
+    ) -> list[str]:
+        """从较早轮次召回与当前话题相关的共同经历。
+
+        采用本地词项重合与时间衰减，避免在 Android 引入 embedding 依赖。
+        最近原文窗口由调用方直接传给模型，因此在这里明确排除。
+        """
+
+        query_terms = _memory_terms(query)
+        if not query_terms or max_items <= 0:
+            return []
+        rows = self._db.execute(
+            """SELECT user_content, assistant_content,
+                      user_image_description, origin, created_at, rowid
+               FROM turns
+               WHERE conversation_id = ? AND status = 'completed'
+               ORDER BY created_at DESC, rowid DESC LIMIT 240""",
+            (conversation_id,),
+        ).fetchall()
+        candidates = rows[max(0, int(exclude_recent_turns)) :]
+        scored: list[tuple[float, int, str]] = []
+        for rank, row in enumerate(candidates):
+            user_text = " ".join(str(row["user_content"] or "").split())
+            assistant_text = " ".join(
+                str(row["assistant_content"] or "").split()
+            )
+            image_text = " ".join(
+                str(row["user_image_description"] or "").split()
+            )
+            combined = " ".join(
+                item for item in (user_text, image_text, assistant_text) if item
+            )
+            overlap = query_terms & _memory_terms(combined)
+            if not overlap:
+                continue
+            specificity = sum(min(len(term), 4) for term in overlap)
+            recency = max(0.0, 1.5 - rank / 80)
+            score = specificity + recency
+            parts = []
+            if user_text:
+                parts.append(f"用户：{user_text[:180]}")
+            if image_text:
+                parts.append(f"当时图片：{image_text[:140]}")
+            if assistant_text:
+                parts.append(f"角色：{assistant_text[:220]}")
+            if parts:
+                scored.append((score, int(row["rowid"]), "；".join(parts)))
+        selected = sorted(scored, key=lambda item: item[0], reverse=True)[
+            : max(1, min(int(max_items), 6))
+        ]
+        selected.sort(key=lambda item: item[1])
+        return [item[2] for item in selected]
 
 
 class CharacterRepository:

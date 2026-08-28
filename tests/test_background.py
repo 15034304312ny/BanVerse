@@ -124,6 +124,35 @@ def test_summary_runner_dedupes_same_conversation(tmp_path) -> None:
     database.close()
 
 
+def test_summary_runner_preserves_each_queued_role_state_turn(tmp_path) -> None:
+    """角色状态逐轮演进，不能因摘要去重而丢掉中间一轮。"""
+
+    database, chats, characters, settings = _make_repos(tmp_path)
+    runner = SummaryRunner(
+        chats=chats,
+        characters=characters,
+        settings=settings,
+        create_text_service=_noop_service,
+        text_api_key=lambda: "",
+        refresh=_noop_refresh,
+    )
+    character = characters.create(empty_card("角色"))
+    conversation = chats.create_conversation(character_id=character.id)
+    first = chats.create_turn(conversation.id, "第一轮", "model")
+    chats.complete_turn(first.id, "第一轮回复")
+    second = chats.create_turn(conversation.id, "第二轮", "model")
+    chats.complete_turn(second.id, "第二轮回复")
+
+    runner.enqueue(conversation.id, "第一轮回复", turn_id=first.id)
+    runner.enqueue(conversation.id, "第二轮回复", turn_id=second.id)
+
+    assert [job.turn_id for job in runner._queue] == [  # noqa: SLF001
+        first.id,
+        second.id,
+    ]
+    database.close()
+
+
 def test_summary_runner_skips_missing_conversation(tmp_path) -> None:
     """入队不存在的会话时静默忽略。"""
 

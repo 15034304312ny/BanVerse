@@ -61,6 +61,15 @@ def model_label(model_id: str) -> str:
     return model_id
 
 
+def model_supports_reasoning(model_id: str) -> bool:
+    """按目录能力判断，而不是让调用方硬编码某个模型 ID。"""
+
+    resolved = resolve_model(model_id)
+    return any(
+        model.id == resolved and model.supports_reasoning for model in MODELS
+    )
+
+
 def text_provider_models(
     provider: str,
     configured_model: str = "",

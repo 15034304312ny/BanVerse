@@ -79,6 +79,7 @@ class SummaryJob:
     request_text: str
     system_prompt: str
     updates_role_state: bool = False
+    turn_id: str = ""
 
 
 class SummaryRunner(QObject):
@@ -110,6 +111,7 @@ class SummaryRunner(QObject):
         self._thread: QThread | None = None
         self._worker: ChatWorker | None = None
         self._job: SummaryJob | None = None
+        self._job_previous_state_json = ""
         self._shutting_down = False
 
     @property
@@ -120,12 +122,17 @@ class SummaryRunner(QObject):
     def busy(self) -> bool:
         return self._thread is not None
 
-    def enqueue(self, conversation_id: str, answer: str) -> None:
+    def enqueue(
+        self, conversation_id: str, answer: str, *, turn_id: str = ""
+    ) -> None:
         if self._shutting_down:
             return
         conversation = self._chats.get_conversation(conversation_id)
         if conversation is None:
             return
+        if not turn_id:
+            latest_turn = self._chats.latest_completed_turn(conversation_id)
+            turn_id = latest_turn.id if latest_turn is not None else ""
         character = (
             self._characters.get(conversation.character_id)
             if conversation.character_id
@@ -134,37 +141,43 @@ class SummaryRunner(QObject):
         if character is not None and self._settings.get_bool(
             "role_memory_enabled", True
         ):
-            user_text = self._chats.latest_completed_user_text(
-                conversation_id
-            )
             job = SummaryJob(
                 conversation_id,
-                role_memory_request(
-                    character.name,
-                    conversation.role_state_json,
-                    user_text,
-                    answer,
-                ),
+                answer,
                 ROLE_MEMORY_SYSTEM_PROMPT,
                 True,
+                turn_id,
             )
         else:
             job = SummaryJob(
                 conversation_id,
-                summary_request(answer),
+                answer,
                 SUMMARY_SYSTEM_PROMPT,
+                turn_id=turn_id,
             )
-        self._queue = deque(
-            queued
-            for queued in self._queue
-            if queued.conversation_id != conversation_id
-        )
+        # 普通会话只需保留最新列表摘要；角色连续性任务则必须逐轮处理，
+        # 否则用户连续发送消息时，中间一轮形成的事实与关系变化会被跳过。
+        if job.updates_role_state:
+            self._queue = deque(
+                queued
+                for queued in self._queue
+                if not (
+                    queued.conversation_id == conversation_id
+                    and queued.turn_id == turn_id
+                )
+            )
+        else:
+            self._queue = deque(
+                queued
+                for queued in self._queue
+                if queued.conversation_id != conversation_id
+            )
         self._queue.append(job)
         self.start_next()
 
     def enqueue_pending(self) -> None:
-        for conversation_id, answer in self._chats.pending_summary_jobs():
-            self.enqueue(conversation_id, answer)
+        for conversation_id, turn_id, answer in self._chats.pending_summary_jobs():
+            self.enqueue(conversation_id, answer, turn_id=turn_id)
         self.start_next()
 
     def start_next(self) -> None:
@@ -177,12 +190,38 @@ class SummaryRunner(QObject):
         if self._chats.get_conversation(job.conversation_id) is None:
             self.start_next()
             return
+        request_text = summary_request(job.request_text)
+        self._job_previous_state_json = ""
+        if job.updates_role_state:
+            conversation = self._chats.get_conversation(job.conversation_id)
+            character = (
+                self._characters.get(conversation.character_id)
+                if conversation and conversation.character_id
+                else None
+            )
+            turn = (
+                self._chats.get_turn(job.conversation_id, job.turn_id)
+                if job.turn_id
+                else self._chats.latest_completed_turn(job.conversation_id)
+            )
+            if conversation is None or character is None or turn is None:
+                self._chats.mark_summary_failed(job.conversation_id)
+                self.start_next()
+                return
+            self._job_previous_state_json = conversation.role_state_json
+            request_text = role_memory_request(
+                character.name,
+                conversation.role_state_json,
+                turn.user_content,
+                job.request_text,
+                turn_id=turn.id,
+            )
         self._job = job
         worker = ChatWorker(
             self._create_text_service(api_key),
             MODEL_CHAT,
             (),
-            job.request_text,
+            request_text,
             system_prompt=job.system_prompt,
             temperature=0.2,
         )
@@ -201,10 +240,16 @@ class SummaryRunner(QObject):
         if job is None:
             return
         if job.updates_role_state:
-            result = parse_role_postprocess(text)
+            result = parse_role_postprocess(
+                text, processed_turn_id=job.turn_id
+            )
             summary = result.summary
             if summary and result.role_state:
-                self._chats.set_role_state(job.conversation_id, result.role_state)
+                self._chats.set_role_state_if_unchanged(
+                    job.conversation_id,
+                    result.role_state,
+                    expected_json=self._job_previous_state_json,
+                )
         else:
             summary = clean_ai_summary(text)
         if summary:
@@ -226,6 +271,7 @@ class SummaryRunner(QObject):
             self._worker, self._thread
         )
         self._job = None
+        self._job_previous_state_json = ""
         self.start_next()
 
     def shutdown(self) -> None:

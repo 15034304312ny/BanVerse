@@ -26,14 +26,17 @@ from PySide6.QtWidgets import (
 
 from ...anthropic_gateway import DeepSeekHttpGateway
 from ...branding import PRODUCT_NAME, PRODUCT_SHORT_NAME
-from ...character_prompt import build_character_prompt
+from ...character_prompt import build_character_prompt, roleplay_memory_query
 from ...chat_service import ChatStreamService
 from ...grsai_gateway import (
     DEFAULT_GRSAI_API_BASE_URL,
     DEFAULT_GRSAI_TEXT_MODEL,
     GrsAiGateway,
 )
-from ...model_catalog import MODEL_CHAT, text_provider_models
+from ...model_catalog import (
+    model_supports_reasoning,
+    text_provider_models,
+)
 from ...tts import TtsProfile, read_tts_profile
 from ..ai_features import (
     OPENING_SYSTEM_SUFFIX,
@@ -72,6 +75,7 @@ from ..image_service import (
     GrsAiImageService,
     SiliconFlowImageService,
 )
+from ..model_discovery import deserialize_models
 from ..platform import is_android_platform
 from ..security.credentials import CredentialStore
 from ..stickers import sticker_by_id
@@ -81,6 +85,8 @@ from .pages.characters_page import CharactersPage
 from .pages.chat_page import ChatPage
 from .pages.conversations_page import ConversationsPage
 from .pages.settings_page import SettingsPage
+
+ROLEPLAY_RECENT_TURNS = 12
 
 if TYPE_CHECKING:
     from ..notification_sound import NotificationSound
@@ -623,9 +629,20 @@ class MainWindow(QMainWindow):
             if conversation.character_id
             else None
         )
+        role_memory_enabled = self._role_memory_enabled()
+        role_state = self._role_state(conversation) if character else {}
         history = self._chats.completed_history(
             conversation.id,
-            max_turns=16 if character is not None else None,
+            max_turns=ROLEPLAY_RECENT_TURNS if character is not None else None,
+        )
+        recalled_memories = (
+            self._chats.recalled_memories(
+                conversation.id,
+                roleplay_memory_query(text, role_state),
+                exclude_recent_turns=ROLEPLAY_RECENT_TURNS,
+            )
+            if character and role_memory_enabled
+            else ()
         )
         character_prompt = (
             build_character_prompt(
@@ -634,7 +651,8 @@ class MainWindow(QMainWindow):
                 text,
                 user_name=self._settings.get("user_name", "用户"),
                 user_persona=self._settings.get("user_persona", ""),
-                role_state=self._role_state(conversation),
+                role_state=role_state,
+                recalled_memories=recalled_memories,
             )
             if character
             else None
@@ -673,11 +691,17 @@ class MainWindow(QMainWindow):
             example_messages=(
                 character_prompt.examples if character_prompt else ()
             ),
+            post_history_prompt=(
+                character_prompt.post_history if character_prompt else ""
+            ),
             image_service=image_service,
             image_path=image_path,
             temperature=(
                 self._roleplay_temperature()
-                if character is not None and conversation.model == MODEL_CHAT
+                if character is not None
+                and not self._text_model_supports_reasoning(
+                    conversation.model
+                )
                 else None
             ),
             turn_id=turn.id,
@@ -691,6 +715,27 @@ class MainWindow(QMainWindow):
 
     def _text_provider_label(self) -> str:
         return "GRS AI" if self._text_provider() == "grsai" else "DeepSeek"
+
+    def _text_model_supports_reasoning(self, conversation_model: str) -> bool:
+        """按实际供应商模型能力判断是否应关闭采样参数。"""
+
+        if self._text_provider() != "grsai":
+            return model_supports_reasoning(conversation_model)
+        configured = self._settings.get(
+            "grsai_text_model", DEFAULT_GRSAI_TEXT_MODEL
+        ).strip()
+        catalog = deserialize_models(
+            self._settings.get("model_catalog_grsai", "")
+        )
+        selected = next(
+            (
+                model
+                for model in catalog
+                if model.provider == "grsai" and model.id == configured
+            ),
+            None,
+        )
+        return bool(selected and selected.supports("reasoning"))
 
     def _refresh_text_model_controls(
         self, selected_model: str = ""
@@ -882,7 +927,7 @@ class MainWindow(QMainWindow):
             self._opening_fallbacks.pop(conversation_id, "")
             self._chats.set_opening_message(conversation_id, "")
         self._schedule_sync()
-        self._enqueue_summary(conversation_id, visible_answer)
+        self._enqueue_summary(conversation_id, visible_answer, turn_id=turn_id)
         conversation = self._chats.get_conversation(conversation_id)
         character = (
             self._characters.get(conversation.character_id)
@@ -1230,8 +1275,19 @@ class MainWindow(QMainWindow):
         if character is None:
             return
 
+        role_memory_enabled = self._role_memory_enabled()
+        role_state = self._role_state(conversation)
         history = self._chats.completed_history(
-            conversation.id, max_turns=16
+            conversation.id, max_turns=ROLEPLAY_RECENT_TURNS
+        )
+        recalled_memories = (
+            self._chats.recalled_memories(
+                conversation.id,
+                roleplay_memory_query("", role_state),
+                exclude_recent_turns=ROLEPLAY_RECENT_TURNS,
+            )
+            if role_memory_enabled
+            else ()
         )
         current_time = datetime.now().astimezone()
         character_prompt = build_character_prompt(
@@ -1240,7 +1296,8 @@ class MainWindow(QMainWindow):
             "",
             user_name=self._settings.get("user_name", "用户"),
             user_persona=self._settings.get("user_persona", ""),
-            role_state=self._role_state(conversation),
+            role_state=role_state,
+            recalled_memories=recalled_memories,
             current_time=current_time,
         )
         turn = self._chats.create_proactive_turn(
@@ -1265,9 +1322,12 @@ class MainWindow(QMainWindow):
             ),
             system_prompt=system_prompt,
             example_messages=character_prompt.examples,
+            post_history_prompt=character_prompt.post_history,
             temperature=(
                 self._roleplay_temperature()
-                if conversation.model == MODEL_CHAT
+                if not self._text_model_supports_reasoning(
+                    conversation.model
+                )
                 else None
             ),
             turn_id=turn.id,
@@ -1322,13 +1382,25 @@ class MainWindow(QMainWindow):
         # 传给模型；否则模型会误以为自己已经开过场并引用不存在的上下文。
         history = ()
         current_time = datetime.now().astimezone()
+        role_memory_enabled = self._role_memory_enabled()
+        role_state = self._role_state(conversation)
+        recalled_memories = (
+            self._chats.recalled_memories(
+                conversation.id,
+                roleplay_memory_query("", role_state),
+                exclude_recent_turns=ROLEPLAY_RECENT_TURNS,
+            )
+            if role_memory_enabled
+            else ()
+        )
         character_prompt = build_character_prompt(
             character.card,
             history,
             "",
             user_name=self._settings.get("user_name", "用户"),
             user_persona=self._settings.get("user_persona", ""),
-            role_state=self._role_state(conversation),
+            role_state=role_state,
+            recalled_memories=recalled_memories,
             current_time=current_time,
         )
         turn = self._chats.create_proactive_turn(
@@ -1355,9 +1427,12 @@ class MainWindow(QMainWindow):
             ),
             system_prompt=system_prompt,
             example_messages=character_prompt.examples,
+            post_history_prompt=character_prompt.post_history,
             temperature=(
                 self._roleplay_temperature()
-                if conversation.model == MODEL_CHAT
+                if not self._text_model_supports_reasoning(
+                    conversation.model
+                )
                 else None
             ),
             turn_id=turn.id,
@@ -1375,9 +1450,13 @@ class MainWindow(QMainWindow):
         if conversation_id == self._conversation_id:
             self._open_conversation(conversation_id, force_reload=True)
 
-    def _enqueue_summary(self, conversation_id: str, answer: str) -> None:
+    def _enqueue_summary(
+        self, conversation_id: str, answer: str, *, turn_id: str = ""
+    ) -> None:
         if self._summary_runner is not None:
-            self._summary_runner.enqueue(conversation_id, answer)
+            self._summary_runner.enqueue(
+                conversation_id, answer, turn_id=turn_id
+            )
 
     def _on_summary_refreshed(self) -> None:
         self.conversations.refresh(select_id=self._conversation_id)
@@ -1401,13 +1480,16 @@ class MainWindow(QMainWindow):
         return max(0.0, min(value, 2.0))
 
     def _role_state(self, conversation) -> dict:
-        if not self._settings.get_bool("role_memory_enabled", True):
+        if not self._role_memory_enabled():
             return {}
         try:
             state = json.loads(conversation.role_state_json or "{}")
         except (TypeError, ValueError):
             return {}
         return state if isinstance(state, dict) else {}
+
+    def _role_memory_enabled(self) -> bool:
+        return self._settings.get_bool("role_memory_enabled", True)
 
     def _profile_for_current_conversation(self) -> TtsProfile:
         conversation = (

@@ -23,7 +23,9 @@ SUMMARY_SYSTEM_PROMPT = """你是中文聊天列表摘要器。
 
 ROLE_MEMORY_SYSTEM_PROMPT = """你是中文角色扮演会话的“列表摘要与连续性记录器”。
 你会收到角色名、上一版状态、用户本轮消息和角色本轮回复。保留已确立事实，只根据本轮
-明确内容更新；不要臆测用户的隐私、身份或心理诊断。
+明确内容更新；不要臆测用户的隐私、身份或心理诊断。情绪变化必须能追溯到事件，强烈
+情绪具有惯性，不能因为话题切换就自动归零；关系数值只在本轮确有靠近、疏远、冲突或
+修复时小幅变化，不能把普通礼貌直接解释成亲密关系。
 
 只输出一行严格 JSON，不要 Markdown、解释或额外文字：
 {"summary":"不超过60字的聊天列表摘要","role_state":{...}}
@@ -31,15 +33,19 @@ ROLE_MEMORY_SYSTEM_PROMPT = """你是中文角色扮演会话的“列表摘要�
 role_state 只使用以下字段，内容未知时用空字符串或空数组：
 {
   "scene":{"location":"","time":"","ongoing_action":""},
-  "character_state":{"mood":"","current_desire":""},
-  "relationship":{"stage":"","preferred_address":"","boundaries":[]},
+  "emotion":{"primary":"","secondary":"","cause":"","intensity":0,"inertia":0},
+  "character_state":{"mood":"","current_desire":"","current_goal":"","concern":"","unspoken_tendency":""},
+  "relationship":{"stage":"","preferred_address":"","trust":0,"intimacy":0,"tension":0,"recent_change":"","boundaries":[]},
   "user_facts":[],
   "shared_memories":[],
   "open_threads":[],
-  "recent_patterns":[]
+  "recent_patterns":[],
+  "last_processed_turn_id":""
 }
-每个数组最多 6 条、每条简短明确。open_threads 记录仍可自然续接的约定、问题或事件；
-recent_patterns 记录最近回复明显使用过的开头、结构或收尾，帮助下一轮避免机械重复。"""
+intensity、inertia、trust、intimacy、tension 使用 0 到 100 的整数。每个数组最多 6 条、
+每条简短明确。open_threads 记录仍可自然续接的约定、问题或事件；recent_patterns 记录
+最近回复明显使用过的开头、结构或收尾，帮助下一轮避免机械重复。last_processed_turn_id
+原样返回请求给出的轮次 ID。"""
 
 PROACTIVE_SYSTEM_SUFFIX = """## 主动消息
 现在由角色主动联系用户并开启一个自然的新话题。延续既有关系和最近对话，
@@ -204,7 +210,7 @@ _EXPLICIT_IMAGE_REQUEST_PATTERNS = (
 def classify_role_reply(
     text: str,
     *,
-    max_dialogue_chars: int = 72,
+    max_dialogue_chars: int = 180,
     max_segments: int = 18,
 ) -> ReplyPlan:
     """把完整回复分类成对白、旁白和一次图片动作。
@@ -373,33 +379,35 @@ def _append_dialogue_segments(
 
 
 def _split_chat_text(text: str, *, max_chars: int) -> list[str]:
+    """按模型自然段投递，只在单段过长时按完整语义句兜底切分。"""
+
     value = re.sub(r"\n{3,}", "\n\n", text).strip()
     if not value:
         return []
-    units: list[str] = []
+    result: list[str] = []
+    limit = max(24, min(int(max_chars), 360))
     for paragraph in re.split(r"\n+", value):
         paragraph = paragraph.strip()
         if not paragraph:
+            continue
+        if len(paragraph) <= limit:
+            result.append(paragraph)
             continue
         sentences = [
             item.strip()
             for item in re.split(r"(?<=[。！？!?…])\s*", paragraph)
             if item.strip()
         ]
-        units.extend(sentences or [paragraph])
-
-    result: list[str] = []
-    current = ""
-    limit = max(24, min(int(max_chars), 160))
-    for unit in units:
-        for piece in _split_long_unit(unit, limit):
-            if current and len(current) + len(piece) > limit:
-                result.append(current)
-                current = piece
-            else:
-                current = f"{current}{piece}" if current else piece
-    if current:
-        result.append(current)
+        current = ""
+        for sentence in sentences or [paragraph]:
+            for piece in _split_long_unit(sentence, limit):
+                if current and len(current) + len(piece) > limit:
+                    result.append(current)
+                    current = piece
+                else:
+                    current = f"{current}{piece}" if current else piece
+        if current:
+            result.append(current)
     return result
 
 
@@ -501,6 +509,7 @@ def role_memory_request(
     previous_state_json: str,
     user_text: str,
     answer: str,
+    turn_id: str = "",
 ) -> str:
     """构造一次同时产出列表摘要与连续性状态的后台请求。"""
 
@@ -513,6 +522,7 @@ def role_memory_request(
     previous_text = json.dumps(previous, ensure_ascii=False)
     return (
         f"角色名：{character_name}\n"
+        f"本轮轮次 ID：{turn_id or '（未知）'}\n"
         f"上一版连续性状态：{previous_text[:6_000]}\n\n"
         f"用户本轮消息：\n{user_text.strip()[:2_000] or '（角色主动发起，无用户新消息）'}\n\n"
         f"角色本轮回复：\n{answer.strip()[:4_000]}\n\n"
@@ -520,7 +530,9 @@ def role_memory_request(
     )
 
 
-def parse_role_postprocess(text: str) -> RolePostprocessResult:
+def parse_role_postprocess(
+    text: str, *, processed_turn_id: str = ""
+) -> RolePostprocessResult:
     """解析并约束模型返回的连续性 JSON；含糊结果不写入长期状态。"""
 
     value = text.strip()
@@ -537,11 +549,13 @@ def parse_role_postprocess(text: str) -> RolePostprocessResult:
     if not isinstance(payload, dict):
         return RolePostprocessResult()
     summary = clean_ai_summary(str(payload.get("summary", "")))
-    state = _sanitize_role_state(payload.get("role_state"))
+    state = _sanitize_role_state(
+        payload.get("role_state"), processed_turn_id=processed_turn_id
+    )
     return RolePostprocessResult(summary, state)
 
 
-def _sanitize_role_state(value) -> dict:
+def _sanitize_role_state(value, *, processed_turn_id: str = "") -> dict:
     if not isinstance(value, dict):
         return {}
 
@@ -554,6 +568,13 @@ def _sanitize_role_state(value) -> dict:
         values = [short_text(entry) for entry in item[:6]]
         return [entry for entry in values if entry]
 
+    def bounded_int(item, default: int = 0) -> int:
+        try:
+            number = int(round(float(item)))
+        except (TypeError, ValueError):
+            number = default
+        return max(0, min(number, 100))
+
     result = {}
     scene = value.get("scene")
     if isinstance(scene, dict):
@@ -561,11 +582,26 @@ def _sanitize_role_state(value) -> dict:
             key: short_text(scene.get(key))
             for key in ("location", "time", "ongoing_action")
         }
+    emotion = value.get("emotion")
+    if isinstance(emotion, dict):
+        result["emotion"] = {
+            "primary": short_text(emotion.get("primary")),
+            "secondary": short_text(emotion.get("secondary")),
+            "cause": short_text(emotion.get("cause")),
+            "intensity": bounded_int(emotion.get("intensity")),
+            "inertia": bounded_int(emotion.get("inertia")),
+        }
     character_state = value.get("character_state")
     if isinstance(character_state, dict):
         result["character_state"] = {
             key: short_text(character_state.get(key))
-            for key in ("mood", "current_desire")
+            for key in (
+                "mood",
+                "current_desire",
+                "current_goal",
+                "concern",
+                "unspoken_tendency",
+            )
         }
     relationship = value.get("relationship")
     if isinstance(relationship, dict):
@@ -573,6 +609,12 @@ def _sanitize_role_state(value) -> dict:
             "stage": short_text(relationship.get("stage")),
             "preferred_address": short_text(
                 relationship.get("preferred_address")
+            ),
+            "trust": bounded_int(relationship.get("trust")),
+            "intimacy": bounded_int(relationship.get("intimacy")),
+            "tension": bounded_int(relationship.get("tension")),
+            "recent_change": short_text(
+                relationship.get("recent_change")
             ),
             "boundaries": short_list(relationship.get("boundaries")),
         }
@@ -583,6 +625,13 @@ def _sanitize_role_state(value) -> dict:
         "recent_patterns",
     ):
         result[key] = short_list(value.get(key))
+    turn_id = short_text(processed_turn_id, limit=80)
+    if turn_id:
+        result["last_processed_turn_id"] = turn_id
+    elif value.get("last_processed_turn_id"):
+        result["last_processed_turn_id"] = short_text(
+            value.get("last_processed_turn_id"), limit=80
+        )
     return result
 
 

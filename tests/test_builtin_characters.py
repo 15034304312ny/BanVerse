@@ -51,6 +51,14 @@ def test_builtin_catalog_has_six_complete_cards_and_square_avatars(qapp):
         assert item.character_id == f"builtin:{item.builtin_id}"
         assert data["extensions"]["deepseek_chat"]["builtin_id"] == item.builtin_id
         assert len(data["alternate_greetings"]) >= 2
+        blocks = [
+            block
+            for block in data["mes_example"].split("<START>")
+            if block.strip()
+        ]
+        assert len(blocks) >= 4
+        assert all(block.count("{{user}}:") >= 2 for block in blocks)
+        assert data["character_version"] == "1.2"
         assert data["character_book"]["entries"]
         assert read_tts_profile(item.card).voice.startswith("zh-CN-")
         assert read_tts_profile(item.card).index_tts2_preset.startswith(
@@ -181,7 +189,7 @@ def test_startup_upgrades_only_untouched_builtin_card(tmp_path, qapp):
 
     upgraded = characters.get(target.character_id)
     assert upgraded.card["data"]["system_prompt"] != "旧版内置提示"
-    assert upgraded.card["data"]["character_version"] == "1.1"
+    assert upgraded.card["data"]["character_version"] == "1.2"
     assert settings.get(seed_setting_key(target.builtin_id)) == (
         target.fingerprint
     )
