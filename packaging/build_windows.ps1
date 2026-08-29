@@ -69,8 +69,31 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Test suite failed." }
     }
 
-    & $Python -m PyInstaller --clean --noconfirm "packaging\deepseek_app.spec"
-    if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
+    # PyInstaller resolves native dependencies through PATH. Codex and other
+    # developer shells may prepend private Poppler/ICU or API-set DLL folders;
+    # collecting those host-only binaries makes QtCore fail on clean machines
+    # (and can even shadow Windows' own ICU in the local smoke test). Keep the
+    # native dependency scan deterministic and restore the caller's PATH as
+    # soon as collection finishes.
+    $OriginalPath = $env:PATH
+    $System32 = Join-Path $env:SystemRoot "System32"
+    $PythonDirectory = Split-Path -Parent $Python
+    $env:PATH = @($PythonDirectory, $System32, $env:SystemRoot) -join ";"
+    try {
+        & $Python -m PyInstaller --clean --noconfirm "packaging\deepseek_app.spec"
+        if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
+    }
+    finally {
+        $env:PATH = $OriginalPath
+    }
+
+    $AnalysisToc = Join-Path $ProjectRoot "build\deepseek_app\Analysis-00.toc"
+    if (-not (Test-Path -LiteralPath $AnalysisToc -PathType Leaf)) {
+        throw "PyInstaller dependency manifest was not created: $AnalysisToc"
+    }
+    if (Select-String -LiteralPath $AnalysisToc -SimpleMatch "\codex-runtimes\") {
+        throw "Host Codex runtime DLLs leaked into the Windows artifact."
+    }
 
     $Exe = Join-Path $ProjectRoot "dist\BanVerse-$Version.exe"
     if (-not (Test-Path -LiteralPath $Exe)) {

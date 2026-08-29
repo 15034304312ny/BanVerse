@@ -20,6 +20,12 @@ if ($VersionSource -notmatch '__version__\s*=\s*"([^"]+)"') {
 $Version = $Matches[1]
 $ProcessName = "BanVerse-$Version"
 $Exe = Join-Path $ProjectRoot "dist\$ProcessName.exe"
+$BrandingFile = Join-Path $ProjectRoot "src\deepseek_cli\branding.py"
+$BrandingSource = Get-Content -LiteralPath $BrandingFile -Raw -Encoding UTF8
+if ($BrandingSource -notmatch 'PRODUCT_NAME\s*=\s*"([^"]+)"') {
+    throw "Unable to read BanVerse product name from $BrandingFile"
+}
+$ExpectedWindowTitle = $Matches[1]
 
 if (-not (Test-Path $Exe)) {
     Write-Error "Artifact not found: $Exe"
@@ -38,6 +44,8 @@ $Parent = Start-Process -FilePath $Exe -PassThru
 $Deadline = (Get-Date).AddSeconds(120)
 $WindowSeen = $false
 $AllExited = $false
+$FatalWindowTitle = ""
+$ReportedHandles = @{}
 while ((Get-Date) -lt $Deadline) {
     $Procs = @(Get-Process $ProcessName -ErrorAction SilentlyContinue)
     if ($Procs.Count -eq 0) {
@@ -47,10 +55,32 @@ while ((Get-Date) -lt $Deadline) {
     foreach ($Proc in $Procs) {
         $Proc.Refresh()
         if ($Proc.MainWindowHandle -ne 0) {
-            $WindowSeen = $true
-            Write-Host "Window created (pid=$($Proc.Id) handle=$($Proc.MainWindowHandle))"
+            $Title = $Proc.MainWindowTitle
+            if ($Title -eq $ExpectedWindowTitle) {
+                $WindowSeen = $true
+                if (-not $ReportedHandles.ContainsKey($Proc.MainWindowHandle)) {
+                    Write-Host (
+                        "BanVerse window rendered " +
+                        "(pid=$($Proc.Id) handle=$($Proc.MainWindowHandle))"
+                    )
+                    $ReportedHandles[$Proc.MainWindowHandle] = $true
+                }
+            }
+            elseif ($Title -eq "Unhandled exception in script") {
+                $FatalWindowTitle = $Title
+                Write-Warning "PyInstaller startup exception dialog detected."
+                break
+            }
+            elseif (-not $ReportedHandles.ContainsKey($Proc.MainWindowHandle)) {
+                Write-Host (
+                    "Ignoring non-application window '$Title' " +
+                    "(pid=$($Proc.Id) handle=$($Proc.MainWindowHandle))"
+                )
+                $ReportedHandles[$Proc.MainWindowHandle] = $true
+            }
         }
     }
+    if ($FatalWindowTitle) { break }
     if ($WindowSeen -and $AllExited -eq $false) {
         # Once the window rendered, keep waiting for the process to exit.
     }
@@ -58,12 +88,16 @@ while ((Get-Date) -lt $Deadline) {
 }
 
 # Refresh exit state one more time.
-if (-not $AllExited) {
+if ($FatalWindowTitle) {
+    Get-Process $ProcessName -ErrorAction SilentlyContinue | Stop-Process -Force
+    $ExitCode = -1
+}
+elseif (-not $AllExited) {
     $Procs = @(Get-Process $ProcessName -ErrorAction SilentlyContinue)
     if ($Procs.Count -eq 0) { $AllExited = $true }
 }
 
-if (-not $AllExited) {
+if (-not $AllExited -and -not $FatalWindowTitle) {
     Write-Warning "Timed out waiting for exit. Killing all $ProcessName processes."
     Get-Process $ProcessName -ErrorAction SilentlyContinue | Stop-Process -Force
     $ExitCode = -1
@@ -76,6 +110,10 @@ Remove-Item Env:DEEPSEEK_CHAT_SMOKE_TEST -ErrorAction SilentlyContinue
 
 Write-Host "Exited=$AllExited ExitCode=$ExitCode WindowRendered=$WindowSeen"
 
+if ($FatalWindowTitle) {
+    Write-Error "Smoke FAILED: packaged startup raised '$FatalWindowTitle'."
+    exit 1
+}
 if (-not $AllExited) {
     Write-Error "Smoke FAILED: app did not exit in time."
     exit 1
