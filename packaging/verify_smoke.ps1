@@ -53,17 +53,26 @@ while ((Get-Date) -lt $Deadline) {
         break
     }
     foreach ($Proc in $Procs) {
-        $Proc.Refresh()
-        if ($Proc.MainWindowHandle -ne 0) {
+        try {
+            $Proc.Refresh()
+            $Handle = $Proc.MainWindowHandle.ToInt64()
             $Title = $Proc.MainWindowTitle
+        }
+        catch {
+            # The smoke timer can terminate the child between Get-Process and
+            # Refresh/property access. That is an expected successful race.
+            continue
+        }
+        if ($Handle -ne 0) {
+            $WindowKey = "$($Proc.Id):$Handle"
             if ($Title -eq $ExpectedWindowTitle) {
                 $WindowSeen = $true
-                if (-not $ReportedHandles.ContainsKey($Proc.MainWindowHandle)) {
+                if (-not $ReportedHandles.ContainsKey($WindowKey)) {
                     Write-Host (
                         "BanVerse window rendered " +
-                        "(pid=$($Proc.Id) handle=$($Proc.MainWindowHandle))"
+                        "(pid=$($Proc.Id) handle=$Handle)"
                     )
-                    $ReportedHandles[$Proc.MainWindowHandle] = $true
+                    $ReportedHandles[$WindowKey] = $true
                 }
             }
             elseif ($Title -eq "Unhandled exception in script") {
@@ -71,12 +80,12 @@ while ((Get-Date) -lt $Deadline) {
                 Write-Warning "PyInstaller startup exception dialog detected."
                 break
             }
-            elseif (-not $ReportedHandles.ContainsKey($Proc.MainWindowHandle)) {
+            elseif (-not $ReportedHandles.ContainsKey($WindowKey)) {
                 Write-Host (
                     "Ignoring non-application window '$Title' " +
-                    "(pid=$($Proc.Id) handle=$($Proc.MainWindowHandle))"
+                    "(pid=$($Proc.Id) handle=$Handle)"
                 )
-                $ReportedHandles[$Proc.MainWindowHandle] = $true
+                $ReportedHandles[$WindowKey] = $true
             }
         }
     }
