@@ -91,6 +91,32 @@ def _smoke_test_enabled() -> bool:
     ) == "1"
 
 
+def _finish_smoke_test(application: QApplication, window) -> None:
+    """关闭冒烟窗口并显式结束 Qt 事件循环。"""
+
+    LOGGER.info("Smoke test exit requested")
+    window.close()
+    # PyInstaller one-file 进程下，只关闭最后一个窗口偶尔不会
+    # 及时终止包装进程。显式 quit 可确保冒烟测试可靠收敛，
+    # closeEvent/aboutToQuit 仍会完整执行后台资源清理。
+    application.quit()
+
+
+def _schedule_smoke_exit(
+    application: QApplication,
+    window,
+    *,
+    delay_ms: int = 500,
+) -> QTimer:
+    """创建由 QApplication 持有的单次冒烟退出定时器。"""
+
+    timer = QTimer(application)
+    timer.setSingleShot(True)
+    timer.timeout.connect(lambda: _finish_smoke_test(application, window))
+    timer.start(delay_ms)
+    return timer
+
+
 def _initialize_optional_audio(
     application: QApplication,
     window,
@@ -162,8 +188,10 @@ def main() -> int:
     application.setWindowIcon(application_icon())
 
     database = None
+    smoke_exit_timer = None
     data_root = app_data_path()
     log_path = configure_startup_logging(data_root)
+    LOGGER.info("Smoke test mode=%s", smoke_test)
     try:
         # Delay application-specific and optional native module imports until a
         # QApplication and persistent crash log are both available.
@@ -230,8 +258,11 @@ def main() -> int:
             # application.quit() 会跳过 closeEvent，并在 onefile 进程退出时
             # 留下仍在运行的 QThread。冒烟不初始化可选音频，避免测试窗口
             # 在音频后端启动过程中立刻退出造成原生析构竞争。
-            QTimer.singleShot(500, window.close)
-        return application.exec()
+            smoke_exit_timer = _schedule_smoke_exit(application, window)
+        exit_code = application.exec()
+        if smoke_exit_timer is not None:
+            smoke_exit_timer.stop()
+        return exit_code
     except Exception as error:
         if _smoke_test_enabled():
             # 无人值守冒烟：不弹模态 QMessageBox（会永久挂起等待点击），
