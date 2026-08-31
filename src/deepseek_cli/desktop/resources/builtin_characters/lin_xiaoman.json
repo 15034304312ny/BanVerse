@@ -22,7 +22,8 @@
     "extensions": {
       "deepseek_chat": {
         "builtin_id": "lin_xiaoman",
-        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoyiNeural", "rate": 8, "pitch": 5, "volume": 0, "emotion_preset": "cheerful", "auto_emotion": true, "index_tts2_preset": "BanVerse_林小满_讯飞聆小糖"}
+        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoyiNeural", "rate": 8, "pitch": 5, "volume": 0, "emotion_preset": "cheerful", "auto_emotion": true, "index_tts2_preset": "BanVerse_林小满_讯飞聆小糖"},
+        "visual_identity": {"schema_version": 1, "description": "22岁成年女性，栗色半扎长发，眼睛弯弯，笑容明亮，随身包挂着小花挂件，轻快亲切的都市设计师气质", "default_outfit": "明亮柔和配色的休闲上衣、简洁半身裙或牛仔裤，斜挎带小花挂件的日常包", "negative_prompt": "不要改变栗色半扎发、弯眼笑容和小花挂件；不要幼态化、改变年龄段或生成校服；不要增加其他人物、界面、文字、Logo、水印", "use_avatar_reference": true}
       }
     },
     "character_book": {

@@ -19,27 +19,43 @@ from PySide6.QtWidgets import (
 
 from ....character_cards import CharacterCardError, load_card, save_card
 from ...builtin_characters import BuiltinCharacterError, BuiltinCharacterManager
-from ...data.repositories import Character, CharacterRepository
+from ...data.repositories import (
+    Character,
+    CharacterRepository,
+    SettingsRepository,
+)
 from ...platform import is_android_platform
 from ..character_editor_dialog import CharacterEditorDialog
 from ..file_dialogs import open_mobile_file_dialog
 from ..mobile import enable_touch_scrolling
+from ..relationship_policy_dialog import RelationshipPolicyDialog
 from ..widgets.avatar_widget import AvatarWidget
 
 
 class CharacterRow(QWidget):
     MINIMUM_HEIGHT = 104
     DESCRIPTION_LIMIT = 150
+    SOURCE_LABELS = {
+        "built_in": "内置",
+        "imported": "导入",
+        "ai_generated": "AI 生成",
+        "synced": "同步",
+    }
 
     def __init__(self, character: Character) -> None:
         super().__init__()
         self._mobile = is_android_platform()
         self.minimum_row_height = 128 if self._mobile else self.MINIMUM_HEIGHT
-        builtin = character.id.startswith("builtin:")
+        source_type = character.source_type
+        builtin = source_type == "built_in" or character.id.startswith("builtin:")
+        source_label = self.SOURCE_LABELS.get(source_type, "")
+        if builtin:
+            source_label = "内置"
         self.setMinimumHeight(self.minimum_row_height)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAccessibleName(
-            f"角色：{character.name}" + ("，内置角色" if builtin else "")
+            f"角色：{character.name}"
+            + (f"，{source_label}角色" if source_label else "，用户创建角色")
         )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -56,8 +72,8 @@ class CharacterRow(QWidget):
         self.name = QLabel(character.name)
         self.name.setObjectName("characterName")
         title.addWidget(self.name)
-        if builtin:
-            self.badge = QLabel("内置")
+        if source_label:
+            self.badge = QLabel(source_label)
             self.badge.setObjectName("builtinBadge")
             self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
             title.addWidget(self.badge)
@@ -99,17 +115,20 @@ class CharacterRow(QWidget):
 class CharactersPage(QWidget):
     start_chat_requested = Signal(str)
     changed = Signal()
+    policy_changed = Signal()
 
     def __init__(
         self,
         repository: CharacterRepository,
         *,
         builtins: BuiltinCharacterManager | None = None,
+        settings: SettingsRepository | None = None,
     ) -> None:
         super().__init__()
         self.setObjectName("settingsPage")
         self._repository = repository
         self._builtins = builtins
+        self._settings = settings
         self._mobile = is_android_platform()
         self._file_dialog: QFileDialog | None = None
         layout = QVBoxLayout(self)
@@ -141,6 +160,10 @@ class CharactersPage(QWidget):
             actions.addStretch(1)
         action_specs = (
             ("编辑", self._edit),
+            (
+                "联系策略" if self._mobile else "关系与联系",
+                self._relationship_policy,
+            ),
             ("复制", self._duplicate),
             ("导出", self._export),
             ("删除", self._delete),
@@ -220,6 +243,15 @@ class CharactersPage(QWidget):
             self.refresh(select_id=duplicate.id)
             self.changed.emit()
 
+    def _relationship_policy(self) -> None:
+        character_id = self.current_id()
+        character = self._repository.get(character_id) if character_id else None
+        if character is None or self._settings is None:
+            return
+        dialog = RelationshipPolicyDialog(character, self._settings, self)
+        if dialog.exec():
+            self.policy_changed.emit()
+
     def _import(self) -> None:
         if self._mobile:
             self._file_dialog = open_mobile_file_dialog(
@@ -240,7 +272,7 @@ class CharactersPage(QWidget):
         except (OSError, CharacterCardError) as exc:
             QMessageBox.warning(self, "无法导入", str(exc))
             return
-        character = self._repository.create(card)
+        character = self._repository.create(card, source_type="imported")
         self.refresh(select_id=character.id)
         self.changed.emit()
 

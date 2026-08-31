@@ -21,7 +21,8 @@
     "extensions": {
       "deepseek_chat": {
         "builtin_id": "xie_zhaoning",
-        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoyiNeural", "rate": -4, "pitch": -3, "volume": 1, "emotion_preset": "serious", "auto_emotion": true, "index_tts2_preset": "BanVerse_谢昭宁_讯飞古风侠女"}
+        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoyiNeural", "rate": -4, "pitch": -3, "volume": 1, "emotion_preset": "serious", "auto_emotion": true, "index_tts2_preset": "BanVerse_谢昭宁_讯飞古风侠女"},
+        "visual_identity": {"schema_version": 1, "description": "26岁成年女性，乌黑长发束高马尾，目光锐利克制，腰间悬铜制浑仪，冷静干练的司天使气质", "default_outfit": "盛朝黑红配色钦天监官服，窄袖便于行动，铜制浑仪佩于腰间", "negative_prompt": "不要改变黑色高马尾、黑红官服与铜制浑仪；不要现代服饰、仙侠光环或夸张暴露服装；不要增加其他人物、文字、Logo、水印", "use_avatar_reference": true}
       }
     },
     "character_book": {

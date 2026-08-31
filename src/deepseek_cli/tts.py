@@ -237,6 +237,14 @@ def extract_speech_segments(
 
 def _clean_markup(text: str) -> str:
     cleaned = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    cleaned = re.sub(r"\[p\d{1,4}\]", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\[=[^\]\r\n]{1,32}\]", "", cleaned)
+    cleaned = re.sub(
+        r"\[(?:rate|speed|pitch|volume|emotion)[^\]\r\n]{0,48}\]",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(
         r"(?<!\*)\*([^*\n]{1,200})\*(?!\*)",
         r"（\1）",
@@ -260,7 +268,12 @@ def _dialogue_parts(value: str, action_cue: str) -> list[tuple[str, str]]:
     text = " ".join(value.split()).strip(" \t")
     if not text:
         return []
-    if re.match(r"^(?:旁白|动作|场景|内心)\s*[:：]", text):
+    if re.match(
+        r"^[【\[]?(?:旁白|动作|场景|内心|发送图片|发图|生成图片|图片提示词|"
+        r"image(?:_prompt)?|工具调用|调用工具)\s*[:：]",
+        text,
+        flags=re.IGNORECASE,
+    ):
         return []
     text = re.sub(
         r"^(?:assistant|角色|人物|AI)\s*[:：]\s*",

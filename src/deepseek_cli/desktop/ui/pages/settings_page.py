@@ -8,34 +8,47 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import (
+    QObject,
+    Qt,
+    QThread,
+    QTime,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTextEdit,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from ....branding import PRODUCT_NAME, PRODUCT_VERSION
+from ....diagnostics import DiagnosticRecorder
 from ....grsai_gateway import (
     DEFAULT_GRSAI_API_BASE_URL,
     DEFAULT_GRSAI_TEXT_MODEL,
     normalize_grsai_base_url,
 )
-from ....model_catalog import MODEL_CHAT, text_provider_models
+from ....model_catalog import MODEL_CHAT, MODELS, text_provider_models
 from ....sync_protocol import (
     DEFAULT_SYNC_URL,
     bearer_credential,
@@ -44,6 +57,7 @@ from ....sync_protocol import (
     parse_sync_pairing,
     validate_sync_password,
 )
+from ....text_models import capability_summary, text_model_capabilities
 from ...data.repositories import SettingsRepository
 from ...image_service import (
     DEFAULT_GRSAI_IMAGE_MODEL,
@@ -88,6 +102,7 @@ from ...xfyun_catalog import (
     deserialize_available_voices,
     serialize_available_voices,
 )
+from ..file_dialogs import open_mobile_file_dialog
 from ..mobile import (
     configure_mobile_form,
     enable_touch_scrolling,
@@ -239,11 +254,14 @@ class SettingsPage(QWidget):
         self,
         settings: SettingsRepository,
         credentials: CredentialStore,
+        diagnostics: DiagnosticRecorder | None = None,
     ) -> None:
         super().__init__()
         self.setObjectName("settingsPage")
         self._settings = settings
         self._credentials = credentials
+        self._diagnostics = diagnostics
+        self._diagnostic_file_dialog = None
         self._model_thread: QThread | None = None
         self._model_worker: ModelCatalogWorker | None = None
         self._model_refresh_provider = ""
@@ -304,7 +322,7 @@ class SettingsPage(QWidget):
         self.text_provider.currentIndexChanged.connect(
             self._save_text_provider
         )
-        account_form.addRow("当前平台", self.text_provider)
+        account_form.addRow("主角色平台", self.text_provider)
         text_deepseek_start = account_form.rowCount()
         self.key_input = QLineEdit()
         self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -422,6 +440,70 @@ class SettingsPage(QWidget):
         self._text_grsai_rows = tuple(
             range(text_grsai_start, account_form.rowCount())
         )
+
+        self.default_model = QComboBox()
+        self.default_model.setAccessibleName("主角色默认模型")
+        self._refresh_default_model_options()
+        self.default_model.currentIndexChanged.connect(self._save_model)
+        account_form.addRow("主角色模型", self.default_model)
+
+        self.aux_text_provider = QComboBox()
+        self.aux_text_provider.addItem("跟随主角色模型", "inherit")
+        self.aux_text_provider.addItem("DeepSeek Platform", "deepseek")
+        self.aux_text_provider.addItem("GRS AI", "grsai")
+        aux_provider = settings.get("aux_text_provider", "inherit").lower()
+        if aux_provider not in {"inherit", "deepseek", "grsai"}:
+            aux_provider = "inherit"
+        self.aux_text_provider.setCurrentIndex(
+            max(0, self.aux_text_provider.findData(aux_provider))
+        )
+        self.aux_text_provider.currentIndexChanged.connect(
+            self._save_aux_text_settings
+        )
+        account_form.addRow("辅助任务平台", self.aux_text_provider)
+
+        aux_deepseek_start = account_form.rowCount()
+        self.aux_deepseek_model = QComboBox()
+        self.aux_deepseek_model.setAccessibleName("DeepSeek 辅助任务模型")
+        for model in MODELS:
+            self.aux_deepseek_model.addItem(model.label, model.id)
+        aux_deepseek_model = settings.get("aux_deepseek_model", MODEL_CHAT)
+        self.aux_deepseek_model.setCurrentIndex(
+            max(0, self.aux_deepseek_model.findData(aux_deepseek_model))
+        )
+        self.aux_deepseek_model.currentIndexChanged.connect(
+            self._save_aux_text_settings
+        )
+        account_form.addRow("辅助 DeepSeek 模型", self.aux_deepseek_model)
+        self._aux_deepseek_rows = tuple(
+            range(aux_deepseek_start, account_form.rowCount())
+        )
+
+        aux_grsai_start = account_form.rowCount()
+        self.aux_grsai_text_model = ModelComboBox()
+        self.aux_grsai_text_model.setAccessibleName("GRS AI 辅助任务模型")
+        self.aux_grsai_text_model.setText(
+            settings.get(
+                "aux_grsai_text_model",
+                settings.get("grsai_text_model", DEFAULT_GRSAI_TEXT_MODEL),
+            )
+        )
+        self.aux_grsai_text_model.editingFinished.connect(
+            self._save_aux_text_settings
+        )
+        self.aux_grsai_text_model.currentIndexChanged.connect(
+            self._save_aux_text_settings
+        )
+        account_form.addRow("辅助 GRS 模型", self.aux_grsai_text_model)
+        self._aux_grsai_rows = tuple(
+            range(aux_grsai_start, account_form.rowCount())
+        )
+
+        self.aux_text_status = QLabel()
+        self.aux_text_status.setWordWrap(True)
+        self.aux_text_status.setProperty("muted", True)
+        account_form.addRow("", self.aux_text_status)
+        self._update_aux_text_status()
         self._text_form = account_form
         layout.addWidget(account)
 
@@ -703,10 +785,55 @@ class SettingsPage(QWidget):
             )
         )
         siliconflow_form.addRow("角色发图", self.autonomous_images_enabled)
+        self.autonomous_image_daily_limit = QSpinBox()
+        self.autonomous_image_daily_limit.setRange(0, 20)
+        self.autonomous_image_daily_limit.setValue(
+            self._bounded_integer_setting(
+                "autonomous_image_daily_limit", 4, 0, 20
+            )
+        )
+        self.autonomous_image_daily_limit.setSuffix(" 张")
+        self.autonomous_image_daily_limit.valueChanged.connect(
+            lambda value: self._settings.set(
+                "autonomous_image_daily_limit", str(value)
+            )
+        )
+        siliconflow_form.addRow(
+            "每日发图上限", self.autonomous_image_daily_limit
+        )
+        self.autonomous_image_cooldown_turns = QSpinBox()
+        self.autonomous_image_cooldown_turns.setRange(1, 20)
+        self.autonomous_image_cooldown_turns.setValue(
+            self._bounded_integer_setting(
+                "autonomous_image_cooldown_turns", 4, 1, 20
+            )
+        )
+        self.autonomous_image_cooldown_turns.setSuffix(" 轮")
+        self.autonomous_image_cooldown_turns.valueChanged.connect(
+            lambda value: self._settings.set(
+                "autonomous_image_cooldown_turns", str(value)
+            )
+        )
+        siliconflow_form.addRow(
+            "发图冷却", self.autonomous_image_cooldown_turns
+        )
+        self.autonomous_images_enabled.toggled.connect(
+            self.autonomous_image_daily_limit.setEnabled
+        )
+        self.autonomous_images_enabled.toggled.connect(
+            self.autonomous_image_cooldown_turns.setEnabled
+        )
+        self.autonomous_image_daily_limit.setEnabled(
+            self.autonomous_images_enabled.isChecked()
+        )
+        self.autonomous_image_cooldown_turns.setEnabled(
+            self.autonomous_images_enabled.isChecked()
+        )
         autonomous_image_note = QLabel(
             "关键词/“发送图片”事件与 AI 语义判断会同时生效；用户明确要求"
             "角色发图片、照片或自拍时也会生成。每轮最多发送一张，避免重复调用。"
-            "成功生图及 AI 判断会产生相应 API 用量。"
+            "自主发图还受每日预算、冷却和用户边界约束；成功生图及 AI 判断会产生"
+            "相应 API 用量。"
         )
         autonomous_image_note.setWordWrap(True)
         autonomous_image_note.setProperty("muted", True)
@@ -1158,6 +1285,27 @@ class SettingsPage(QWidget):
         self.user_persona.setFixedHeight(82)
         self.user_persona.textChanged.connect(self._save_roleplay_settings)
         roleplay_form.addRow("人物简介", self.user_persona)
+        self.roleplay_sampling_mode = QComboBox()
+        self.roleplay_sampling_mode.addItem(
+            "推荐创造性（temperature）", "temperature"
+        )
+        self.roleplay_sampling_mode.addItem(
+            "使用平台默认值", "provider_default"
+        )
+        self.roleplay_sampling_mode.addItem("核采样（top_p）", "top_p")
+        sampling_mode = settings.get(
+            "roleplay_sampling_mode", "temperature"
+        ).lower()
+        self.roleplay_sampling_mode.setCurrentIndex(
+            max(0, self.roleplay_sampling_mode.findData(sampling_mode))
+        )
+        self.roleplay_sampling_mode.currentIndexChanged.connect(
+            self._save_roleplay_settings
+        )
+        self.roleplay_sampling_mode.currentIndexChanged.connect(
+            self._update_roleplay_sampling_controls
+        )
+        roleplay_form.addRow("采样方式", self.roleplay_sampling_mode)
         self.roleplay_temperature = QDoubleSpinBox()
         self.roleplay_temperature.setRange(0.0, 2.0)
         self.roleplay_temperature.setSingleStep(0.1)
@@ -1174,6 +1322,83 @@ class SettingsPage(QWidget):
             self._save_roleplay_settings
         )
         roleplay_form.addRow("回复创造性", self.roleplay_temperature)
+        self.roleplay_top_p = QDoubleSpinBox()
+        self.roleplay_top_p.setRange(0.0, 1.0)
+        self.roleplay_top_p.setSingleStep(0.05)
+        self.roleplay_top_p.setDecimals(2)
+        try:
+            roleplay_top_p = float(settings.get("roleplay_top_p", "0.9"))
+        except ValueError:
+            roleplay_top_p = 0.9
+        self.roleplay_top_p.setValue(roleplay_top_p)
+        self.roleplay_top_p.setAccessibleName("角色回复核采样概率")
+        self.roleplay_top_p.valueChanged.connect(
+            self._save_roleplay_settings
+        )
+        roleplay_form.addRow("Top P", self.roleplay_top_p)
+        self._update_roleplay_sampling_controls()
+        self.roleplay_director_enabled = QCheckBox(
+            "仅在冲突、转折、承诺或剧情节点增加一次隐藏规划"
+        )
+        self.roleplay_director_enabled.setChecked(
+            settings.get("roleplay_director_enabled", "false").lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.roleplay_director_enabled.toggled.connect(
+            self._save_roleplay_settings
+        )
+        self.roleplay_director_enabled.toggled.connect(
+            self._update_roleplay_director_controls
+        )
+        roleplay_form.addRow("关键轮次 Director", self.roleplay_director_enabled)
+        self.roleplay_director_threshold = QSpinBox()
+        self.roleplay_director_threshold.setRange(1, 10)
+        try:
+            director_threshold = int(
+                settings.get("roleplay_director_threshold", "6")
+            )
+        except ValueError:
+            director_threshold = 6
+        self.roleplay_director_threshold.setValue(
+            max(1, min(director_threshold, 10))
+        )
+        self.roleplay_director_threshold.setSuffix(" / 10")
+        self.roleplay_director_threshold.valueChanged.connect(
+            self._save_roleplay_settings
+        )
+        roleplay_form.addRow("触发阈值", self.roleplay_director_threshold)
+        self.roleplay_director_max_extra_calls = QSpinBox()
+        self.roleplay_director_max_extra_calls.setRange(0, 1)
+        self.roleplay_director_max_extra_calls.setValue(
+            0
+            if settings.get("roleplay_director_max_extra_calls", "1") == "0"
+            else 1
+        )
+        self.roleplay_director_max_extra_calls.setSpecialValueText("禁止额外调用")
+        self.roleplay_director_max_extra_calls.setSuffix(" 次/轮")
+        self.roleplay_director_max_extra_calls.valueChanged.connect(
+            self._save_roleplay_settings
+        )
+        roleplay_form.addRow(
+            "额外调用上限", self.roleplay_director_max_extra_calls
+        )
+        self.roleplay_director_timeout = QSpinBox()
+        self.roleplay_director_timeout.setRange(3, 20)
+        try:
+            director_timeout = int(
+                settings.get("roleplay_director_timeout_seconds", "8")
+            )
+        except ValueError:
+            director_timeout = 8
+        self.roleplay_director_timeout.setValue(
+            max(3, min(director_timeout, 20))
+        )
+        self.roleplay_director_timeout.setSuffix(" 秒")
+        self.roleplay_director_timeout.valueChanged.connect(
+            self._save_roleplay_settings
+        )
+        roleplay_form.addRow("规划超时", self.roleplay_director_timeout)
+        self._update_roleplay_director_controls()
         self.role_memory_enabled = QCheckBox(
             "自动维护场景、关系、共同记忆和未完事件"
         )
@@ -1185,9 +1410,42 @@ class SettingsPage(QWidget):
             self._save_roleplay_settings
         )
         roleplay_form.addRow("连续性记忆", self.role_memory_enabled)
+        self.memory_retention_days = QSpinBox()
+        self.memory_retention_days.setRange(0, 3650)
+        self.memory_retention_days.setSpecialValueText("永久保留")
+        try:
+            retention_days = int(
+                settings.get("memory_retention_days", "365")
+            )
+        except ValueError:
+            retention_days = 365
+        self.memory_retention_days.setValue(
+            max(0, min(retention_days, 3650))
+        )
+        self.memory_retention_days.setSuffix(" 天")
+        self.memory_retention_days.valueChanged.connect(
+            self._save_roleplay_settings
+        )
+        roleplay_form.addRow("记忆保留期", self.memory_retention_days)
+        self.memory_max_items = QSpinBox()
+        self.memory_max_items.setRange(10, 2000)
+        try:
+            max_memories = int(settings.get("memory_max_items", "200"))
+        except ValueError:
+            max_memories = 200
+        self.memory_max_items.setValue(max(10, min(max_memories, 2000)))
+        self.memory_max_items.setSuffix(" 条/会话")
+        self.memory_max_items.valueChanged.connect(
+            self._save_roleplay_settings
+        )
+        roleplay_form.addRow("记忆上限", self.memory_max_items)
         roleplay_note = QLabel(
-            "默认创造性 1.3 适合日常角色对话；仅作用于 V4 Flash 角色会话。"
-            "连续性状态与列表摘要在同一次后台请求中更新，不会额外增加请求次数。"
+            "默认创造性 1.3 保持旧版本行为；平台默认值不会发送采样字段。"
+            "应用仅下发当前模型明确支持的参数，思考模型会自动忽略这些设置。"
+            "关键轮次 Director 默认关闭；启用后由辅助任务模型输出受控 JSON，失败会静默回退，"
+            "普通问候仍只调用一次主角色模型。每个会话可在“编辑会话”中单独禁用。"
+            "连续性状态与列表摘要在同一次后台请求中更新。关闭记忆后停止读取、提取和写入；"
+            "每个角色还可在聊天页“记忆”中单独关闭。"
         )
         roleplay_note.setWordWrap(True)
         roleplay_note.setProperty("muted", True)
@@ -1298,10 +1556,6 @@ class SettingsPage(QWidget):
         appearance = QGroupBox("聊天与外观")
         appearance_form = QFormLayout(appearance)
         configure_mobile_form(appearance_form)
-        self.default_model = QComboBox()
-        self._refresh_default_model_options()
-        self.default_model.currentIndexChanged.connect(self._save_model)
-        appearance_form.addRow("新会话默认模型", self.default_model)
         self.theme = QComboBox()
         self.theme.addItem("跟随系统", "system")
         self.theme.addItem("浅色", "light")
@@ -1355,6 +1609,119 @@ class SettingsPage(QWidget):
         self.proactive_enabled.toggled.connect(self._save_proactive_settings)
         appearance_form.addRow("主动消息", self.proactive_enabled)
 
+        self.relationship_pace = QComboBox()
+        for label, value in (
+            ("慢热：需要更多明确事件", "slow"),
+            ("自然：循序渐进", "natural"),
+            ("较快：仍需尊重明确边界", "fast"),
+        ):
+            self.relationship_pace.addItem(label, value)
+        pace = settings.get("relationship_pace", "natural")
+        self.relationship_pace.setCurrentIndex(
+            max(0, self.relationship_pace.findData(pace))
+        )
+        self.relationship_pace.currentIndexChanged.connect(
+            self._save_proactive_settings
+        )
+        appearance_form.addRow("关系发展", self.relationship_pace)
+
+        self.relationship_preferred_address = QLineEdit(
+            settings.get("relationship_preferred_address", "")
+        )
+        self.relationship_preferred_address.setMaxLength(40)
+        self.relationship_preferred_address.setPlaceholderText(
+            "留空表示不指定，例如：阿澄、老师"
+        )
+        self.relationship_preferred_address.editingFinished.connect(
+            self._save_proactive_settings
+        )
+        appearance_form.addRow("偏好称呼", self.relationship_preferred_address)
+
+        self.relationship_allowed_topics = QLineEdit(
+            settings.get("relationship_allowed_topics", "")
+        )
+        self.relationship_allowed_topics.setPlaceholderText(
+            "用逗号分隔，例如：电影、做饭、旅行"
+        )
+        self.relationship_allowed_topics.editingFinished.connect(
+            self._save_proactive_settings
+        )
+        appearance_form.addRow("欢迎话题", self.relationship_allowed_topics)
+
+        self.relationship_blocked_topics = QLineEdit(
+            settings.get("relationship_blocked_topics", "")
+        )
+        self.relationship_blocked_topics.setPlaceholderText(
+            "角色不得主动展开，例如：收入、住址"
+        )
+        self.relationship_blocked_topics.editingFinished.connect(
+            self._save_proactive_settings
+        )
+        appearance_form.addRow("禁止话题", self.relationship_blocked_topics)
+
+        self.proactive_frequency = QComboBox()
+        for label, value in (
+            ("不主动联系", "off"),
+            ("偶尔（至少间隔 12 小时）", "low"),
+            ("适中（至少间隔 4 小时）", "normal"),
+            ("较频繁（至少间隔 90 分钟）", "high"),
+        ):
+            self.proactive_frequency.addItem(label, value)
+        frequency = settings.get("proactive_frequency", "normal")
+        self.proactive_frequency.setCurrentIndex(
+            max(0, self.proactive_frequency.findData(frequency))
+        )
+        self.proactive_frequency.currentIndexChanged.connect(
+            self._save_proactive_settings
+        )
+        appearance_form.addRow("联系频率", self.proactive_frequency)
+
+        self.proactive_daily_limit = QSpinBox()
+        self.proactive_daily_limit.setRange(0, 12)
+        self.proactive_daily_limit.setSuffix(" 条/天")
+        self.proactive_daily_limit.setValue(
+            max(
+                0,
+                min(
+                    self._bounded_integer_setting(
+                        "proactive_daily_limit", 2, 0, 12
+                    ),
+                    12,
+                ),
+            )
+        )
+        self.proactive_daily_limit.valueChanged.connect(
+            self._save_proactive_settings
+        )
+        appearance_form.addRow("每日上限", self.proactive_daily_limit)
+
+        quiet_row = responsive_row_layout()
+        quiet_start = QTime.fromString(
+            settings.get("proactive_quiet_start", "22:30"), "HH:mm"
+        )
+        if not quiet_start.isValid():
+            quiet_start = QTime(22, 30)
+        self.proactive_quiet_start = QTimeEdit(quiet_start)
+        self.proactive_quiet_start.setDisplayFormat("HH:mm")
+        quiet_end = QTime.fromString(
+            settings.get("proactive_quiet_end", "08:00"), "HH:mm"
+        )
+        if not quiet_end.isValid():
+            quiet_end = QTime(8, 0)
+        self.proactive_quiet_end = QTimeEdit(quiet_end)
+        self.proactive_quiet_end.setDisplayFormat("HH:mm")
+        quiet_row.addWidget(self.proactive_quiet_start)
+        quiet_row.addWidget(QLabel("至"))
+        quiet_row.addWidget(self.proactive_quiet_end)
+        quiet_row.addStretch(1)
+        self.proactive_quiet_start.timeChanged.connect(
+            self._save_proactive_settings
+        )
+        self.proactive_quiet_end.timeChanged.connect(
+            self._save_proactive_settings
+        )
+        appearance_form.addRow("静默时段", quiet_row)
+
         interval_row = responsive_row_layout()
         self.proactive_min_minutes = QSpinBox()
         self.proactive_min_minutes.setRange(5, 1_440)
@@ -1383,13 +1750,14 @@ class SettingsPage(QWidget):
             self._save_proactive_settings
         )
         proactive_note = QLabel(
-            "仅在软件运行且当前为角色会话时触发；角色会读取设备本地时间，"
-            "按清晨、午间、傍晚、晚间和深夜选择自然话题。每次会调用 DeepSeek"
-            "或 GRS AI 当前文本平台并产生相应 API 用量。"
+            "策略只展示可理解的关系速度、话题和联系规则，不公开或游戏化隐藏关系数值。"
+            "静默时段、冷却、每日上限和用户拒绝会在调用模型前拦截；同账号双端还会使用"
+            "服务端幂等租约。每条实际生成的主动消息会产生文本 API 用量。"
         )
         proactive_note.setWordWrap(True)
         proactive_note.setProperty("muted", True)
         appearance_form.addRow("", proactive_note)
+        self._update_proactive_controls()
         layout.addWidget(appearance)
 
         sync_group = QGroupBox("双端消息同步")
@@ -1590,6 +1958,42 @@ class SettingsPage(QWidget):
         privacy_layout.addWidget(clear_data)
         layout.addWidget(privacy)
 
+        diagnostics_group = QGroupBox("本地诊断")
+        diagnostics_layout = QVBoxLayout(diagnostics_group)
+        diagnostics_note = QLabel(
+            "诊断默认只保存在本机，记录功能阶段、平台/模型标识、耗时、计数和脱敏错误码。"
+            "它不记录聊天正文、角色卡、用户资料、图片、音频、账户/设备标识、API Key 或同步令牌，"
+            "也不会自动上传。只有点击导出后才会创建可分享的 ZIP。"
+        )
+        diagnostics_note.setWordWrap(True)
+        diagnostics_note.setProperty("muted", True)
+        diagnostics_layout.addWidget(diagnostics_note)
+        self.diagnostics_status = QLabel()
+        self.diagnostics_status.setWordWrap(True)
+        self.diagnostics_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        diagnostics_layout.addWidget(self.diagnostics_status)
+        diagnostic_actions = responsive_row_layout()
+        refresh_diagnostics = QPushButton("刷新摘要")
+        refresh_diagnostics.clicked.connect(self._refresh_diagnostics)
+        copy_diagnostics = QPushButton("复制摘要")
+        copy_diagnostics.clicked.connect(self._copy_diagnostics_summary)
+        export_diagnostics = QPushButton("导出脱敏诊断包")
+        export_diagnostics.setObjectName("primaryButton")
+        export_diagnostics.clicked.connect(self._export_diagnostics)
+        for button in (
+            refresh_diagnostics,
+            copy_diagnostics,
+            export_diagnostics,
+        ):
+            button.setEnabled(self._diagnostics is not None)
+            diagnostic_actions.addWidget(button)
+        diagnostic_actions.addStretch(1)
+        diagnostics_layout.addLayout(diagnostic_actions)
+        layout.addWidget(diagnostics_group)
+        self._refresh_diagnostics()
+
         about = QLabel(f"{PRODUCT_NAME} {PRODUCT_VERSION}")
         about.setProperty("muted", True)
         layout.addWidget(about)
@@ -1631,10 +2035,122 @@ class SettingsPage(QWidget):
         self._catalog_auto_refresh_started = True
         QTimer.singleShot(0, self._refresh_active_catalogs)
 
+    def _diagnostics_summary_text(self) -> str:
+        if self._diagnostics is None:
+            return "当前运行环境未启用本地诊断。"
+        summary = self._diagnostics.summary()
+        event_count = int(summary.get("event_count", 0))
+        outcomes = summary.get("outcomes", {})
+        errors = summary.get("errors", {})
+        error_count = sum(
+            int(value) for value in errors.values()
+        ) if isinstance(errors, dict) else 0
+        completed = (
+            int(outcomes.get("ok", 0))
+            if isinstance(outcomes, dict)
+            else 0
+        )
+        last_event = str(summary.get("last_event_at", "") or "尚无事件")
+        lines = [
+            f"本机事件：{event_count}；成功阶段：{completed}；错误阶段：{error_count}；"
+            f"最近记录：{last_event}"
+        ]
+        latency = summary.get("latency", {})
+        first_visible = (
+            latency.get("text_chat.first_visible_segment", {})
+            if isinstance(latency, dict)
+            else {}
+        )
+        if isinstance(first_visible, dict) and first_visible.get("samples"):
+            lines.append(
+                "首段可见耗时："
+                f"p50 {first_visible.get('p50_ms')} ms / "
+                f"p95 {first_visible.get('p95_ms')} ms "
+                f"（{first_visible.get('samples')} 次）"
+            )
+        rates = summary.get("rates", {})
+        text_rates = rates.get("text_chat", {}) if isinstance(rates, dict) else {}
+        if isinstance(text_rates, dict) and text_rates.get("completed_tasks"):
+            lines.append(
+                "文本任务："
+                f"失败率 {float(text_rates.get('failure_rate', 0)):.1%}；"
+                f"取消率 {float(text_rates.get('cancellation_rate', 0)):.1%}"
+            )
+        if isinstance(errors, dict) and errors:
+            top_errors = sorted(
+                errors.items(), key=lambda item: (-int(item[1]), str(item[0]))
+            )[:5]
+            lines.append(
+                "最近错误码："
+                + "、".join(f"{code} × {count}" for code, count in top_errors)
+            )
+        return "\n".join(lines)
+
+    def _refresh_diagnostics(self) -> None:
+        self.diagnostics_status.setText(self._diagnostics_summary_text())
+
+    def _copy_diagnostics_summary(self) -> None:
+        QApplication.clipboard().setText(self._diagnostics_summary_text())
+        self._refresh_diagnostics()
+
+    def _export_diagnostics(self) -> None:
+        if self._diagnostics is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "导出脱敏诊断包",
+            "将包含：功能阶段、平台/模型标识、耗时、计数和脱敏错误码。\n\n"
+            "不会包含：聊天正文、角色卡、用户资料、图片、音频、数据库、启动日志、"
+            "账户/设备标识、API Key、Token、Cookie 或密码。\n\n"
+            "是否继续选择保存位置？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        filename = f"BanVerse-diagnostics-{datetime.now():%Y%m%d-%H%M}.zip"
+        if self._mobile:
+            self._diagnostic_file_dialog = open_mobile_file_dialog(
+                self,
+                "导出脱敏诊断包",
+                "ZIP 压缩包 (*.zip)",
+                self._export_diagnostics_to_path,
+                save=True,
+                initial_path=filename,
+                mime_types=("application/zip",),
+            )
+            self._diagnostic_file_dialog.finished.connect(
+                self._diagnostic_file_dialog_finished
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出脱敏诊断包",
+            filename,
+            "ZIP 压缩包 (*.zip)",
+        )
+        if path:
+            self._export_diagnostics_to_path(path)
+
+    def _export_diagnostics_to_path(self, path: str) -> None:
+        if self._diagnostics is None or not path:
+            return
+        try:
+            output = self._diagnostics.export(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "导出失败", f"无法写入诊断包：{exc}")
+            return
+        self._refresh_diagnostics()
+        QMessageBox.information(self, "导出完成", f"脱敏诊断包已保存：\n{output}")
+
+    def _diagnostic_file_dialog_finished(self, _result: int) -> None:
+        self._diagnostic_file_dialog = None
+
     def _refresh_active_catalogs(self) -> None:
         providers: list[str] = []
         if (
             self.text_provider.currentData() == "grsai"
+            or self.aux_text_provider.currentData() == "grsai"
             or self.image_provider.currentData() == "grsai"
         ):
             providers.append("grsai")
@@ -1707,15 +2223,26 @@ class SettingsPage(QWidget):
 
     def _update_provider_sections(self) -> None:
         text_provider = self.text_provider.currentData() or "deepseek"
+        aux_provider = self.aux_text_provider.currentData() or "inherit"
         self._set_form_rows_visible(
             self._text_form,
             self._text_deepseek_rows,
-            text_provider == "deepseek",
+            text_provider == "deepseek" or aux_provider == "deepseek",
         )
         self._set_form_rows_visible(
             self._text_form,
             self._text_grsai_rows,
-            text_provider == "grsai",
+            text_provider == "grsai" or aux_provider == "grsai",
+        )
+        self._set_form_rows_visible(
+            self._text_form,
+            self._aux_deepseek_rows,
+            aux_provider == "deepseek",
+        )
+        self._set_form_rows_visible(
+            self._text_form,
+            self._aux_grsai_rows,
+            aux_provider == "grsai",
         )
 
         image_provider = self.image_provider.currentData() or "siliconflow"
@@ -1771,12 +2298,12 @@ class SettingsPage(QWidget):
         combo.clear()
         for model in choices:
             combo.addItem(model.label, model.id)
-            if model.description:
-                combo.setItemData(
-                    combo.count() - 1,
-                    model.description,
-                    3,
-                )
+            tooltip = " · ".join(
+                part
+                for part in (model.description, model.capability_summary)
+                if part
+            )
+            combo.setItemData(combo.count() - 1, tooltip, 3)
         if current and combo.findData(current) < 0:
             combo.addItem(f"{current}  [自定义]", current)
         selected = combo.findData(current)
@@ -1805,6 +2332,9 @@ class SettingsPage(QWidget):
         if provider == "grsai":
             self._populate_model_combo(
                 self.grsai_text_model, usable, "chat"
+            )
+            self._populate_model_combo(
+                self.aux_grsai_text_model, usable, "chat"
             )
             self._populate_model_combo(
                 self.grsai_vision_model, usable, "vision"
@@ -2107,7 +2637,52 @@ class SettingsPage(QWidget):
                 self._ensure_model_catalog(str(provider))
         if hasattr(self, "default_model"):
             self._refresh_default_model_options()
+        if hasattr(self, "aux_text_status"):
+            self._update_aux_text_status()
         self.text_settings_changed.emit()
+
+    def _save_aux_text_settings(self, *_args) -> None:
+        provider = self.aux_text_provider.currentData() or "inherit"
+        deepseek_model = self.aux_deepseek_model.currentData() or MODEL_CHAT
+        grsai_model = (
+            self.aux_grsai_text_model.text().strip()
+            or self.grsai_text_model.text().strip()
+            or DEFAULT_GRSAI_TEXT_MODEL
+        )
+        self.aux_grsai_text_model.blockSignals(True)
+        self.aux_grsai_text_model.setText(grsai_model)
+        self.aux_grsai_text_model.blockSignals(False)
+        self._settings.set("aux_text_provider", str(provider))
+        self._settings.set("aux_deepseek_model", str(deepseek_model))
+        self._settings.set("aux_grsai_text_model", grsai_model)
+        if hasattr(self, "_text_form"):
+            self._update_provider_sections()
+            if self.isVisible() and provider == "grsai":
+                self._ensure_model_catalog("grsai")
+        self._update_aux_text_status()
+        self.text_settings_changed.emit()
+
+    def _update_aux_text_status(self) -> None:
+        provider = self.aux_text_provider.currentData() or "inherit"
+        if provider == "inherit":
+            text = (
+                "辅助任务跟随主角色模型，不增加另一套凭据。范围包括摘要、角色状态、"
+                "记忆候选和图片意图判断；角色正文、开场白与主动消息仍使用主角色模型。"
+            )
+        else:
+            label = "GRS AI" if provider == "grsai" else "DeepSeek"
+            getter_name = (
+                "get_grsai_text_api_key" if provider == "grsai" else "get_api_key"
+            )
+            getter = getattr(self._credentials, getter_name, None)
+            configured = bool(callable(getter) and str(getter() or "").strip())
+            fallback = (
+                "凭据已配置；辅助调用失败会跳过本次后台更新，不影响已生成的角色回复。"
+                if configured
+                else "尚未配置该平台凭据，将自动回退到主角色平台；主平台也不可用时跳过辅助任务。"
+            )
+            text = f"辅助任务固定使用 {label}。{fallback}"
+        self.aux_text_status.setText(text)
 
     def _toggle_grsai_text_key(self, visible: bool) -> None:
         self.grsai_text_key_input.setEchoMode(
@@ -2167,6 +2742,10 @@ class SettingsPage(QWidget):
         self.grsai_text_model.blockSignals(False)
         self._settings.set("grsai_text_base_url", base_url)
         self._settings.set("grsai_text_model", model)
+        if not self._settings.contains("aux_grsai_text_model"):
+            self.aux_grsai_text_model.blockSignals(True)
+            self.aux_grsai_text_model.setText(model)
+            self.aux_grsai_text_model.blockSignals(False)
         self._refresh_default_model_options()
         self.text_settings_changed.emit()
 
@@ -2568,6 +3147,19 @@ class SettingsPage(QWidget):
         self.default_model.clear()
         for model in models:
             self.default_model.addItem(model.label, model.id)
+            capabilities = text_model_capabilities(
+                provider,
+                model.id,
+                configured_model=self.grsai_text_model.text(),
+                catalog=deserialize_models(
+                    self._settings.get("model_catalog_grsai", "")
+                ),
+            )
+            self.default_model.setItemData(
+                self.default_model.count() - 1,
+                "主角色正文 · " + capability_summary(capabilities),
+                3,
+            )
         index = self.default_model.findData(selected)
         self.default_model.setCurrentIndex(index if index >= 0 else 0)
         self.default_model.blockSignals(False)
@@ -2579,6 +3171,20 @@ class SettingsPage(QWidget):
         )
         current = self.default_model.currentData() or MODEL_CHAT
         self._settings.set("default_model", current)
+
+    def _update_roleplay_sampling_controls(self, *_args) -> None:
+        mode = self.roleplay_sampling_mode.currentData() or "temperature"
+        self.roleplay_temperature.setEnabled(mode == "temperature")
+        self.roleplay_top_p.setEnabled(mode == "top_p")
+
+    def _update_roleplay_director_controls(self, *_args) -> None:
+        enabled = self.roleplay_director_enabled.isChecked()
+        for widget in (
+            self.roleplay_director_threshold,
+            self.roleplay_director_max_extra_calls,
+            self.roleplay_director_timeout,
+        ):
+            widget.setEnabled(enabled)
 
     def _save_tts_provider(self, index: int) -> None:
         provider = self.tts_provider.itemData(index) or "edge"
@@ -2806,8 +3412,39 @@ class SettingsPage(QWidget):
             f"{self.roleplay_temperature.value():.1f}",
         )
         self._settings.set(
+            "roleplay_sampling_mode",
+            str(
+                self.roleplay_sampling_mode.currentData() or "temperature"
+            ),
+        )
+        self._settings.set(
+            "roleplay_top_p", f"{self.roleplay_top_p.value():.2f}"
+        )
+        self._settings.set(
+            "roleplay_director_enabled",
+            "true" if self.roleplay_director_enabled.isChecked() else "false",
+        )
+        self._settings.set(
+            "roleplay_director_threshold",
+            str(self.roleplay_director_threshold.value()),
+        )
+        self._settings.set(
+            "roleplay_director_max_extra_calls",
+            str(self.roleplay_director_max_extra_calls.value()),
+        )
+        self._settings.set(
+            "roleplay_director_timeout_seconds",
+            str(self.roleplay_director_timeout.value()),
+        )
+        self._settings.set(
             "role_memory_enabled",
             "true" if self.role_memory_enabled.isChecked() else "false",
+        )
+        self._settings.set(
+            "memory_retention_days", str(self.memory_retention_days.value())
+        )
+        self._settings.set(
+            "memory_max_items", str(self.memory_max_items.value())
         )
 
     def _save_sync_settings(self, *_args) -> bool:
@@ -3147,4 +3784,54 @@ class SettingsPage(QWidget):
         )
         self._settings.set("proactive_min_minutes", str(minimum))
         self._settings.set("proactive_max_minutes", str(maximum))
+        self._settings.set(
+            "relationship_pace", str(self.relationship_pace.currentData())
+        )
+        self._settings.set(
+            "relationship_preferred_address",
+            self.relationship_preferred_address.text().strip()[:40],
+        )
+        self._settings.set(
+            "relationship_allowed_topics",
+            self.relationship_allowed_topics.text().strip()[:1_000],
+        )
+        self._settings.set(
+            "relationship_blocked_topics",
+            self.relationship_blocked_topics.text().strip()[:1_000],
+        )
+        self._settings.set(
+            "proactive_frequency",
+            str(self.proactive_frequency.currentData()),
+        )
+        self._settings.set(
+            "proactive_daily_limit",
+            str(self.proactive_daily_limit.value()),
+        )
+        self._settings.set(
+            "proactive_quiet_start",
+            self.proactive_quiet_start.time().toString("HH:mm"),
+        )
+        self._settings.set(
+            "proactive_quiet_end",
+            self.proactive_quiet_end.time().toString("HH:mm"),
+        )
+        self._update_proactive_controls()
         self.proactive_settings_changed.emit()
+
+    def _update_proactive_controls(self) -> None:
+        enabled = self.proactive_enabled.isChecked()
+        frequency_enabled = (
+            enabled and self.proactive_frequency.currentData() != "off"
+        )
+        for control in (
+            self.proactive_min_minutes,
+            self.proactive_max_minutes,
+            self.proactive_frequency,
+        ):
+            control.setEnabled(enabled)
+        for control in (
+            self.proactive_daily_limit,
+            self.proactive_quiet_start,
+            self.proactive_quiet_end,
+        ):
+            control.setEnabled(frequency_enabled)

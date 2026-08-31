@@ -21,7 +21,8 @@
     "extensions": {
       "deepseek_chat": {
         "builtin_id": "zhou_jiming",
-        "tts": {"schema_version": 2, "voice": "zh-CN-YunjianNeural", "rate": -8, "pitch": -5, "volume": 2, "emotion_preset": "calm", "auto_emotion": true, "index_tts2_preset": "BanVerse_周既明_讯飞贴心男友"}
+        "tts": {"schema_version": 2, "voice": "zh-CN-YunjianNeural", "rate": -8, "pitch": -5, "volume": 2, "emotion_preset": "calm", "auto_emotion": true, "index_tts2_preset": "BanVerse_周既明_讯飞贴心男友"},
+        "visual_identity": {"schema_version": 1, "description": "34岁成年男性，利落黑色短发，沉静可靠的面容，左腕佩戴边缘磨损的气压表，山地救援人员体格", "default_outfit": "深蓝与橙色拼接的专业山地救援服，耐候外套和实用装备", "negative_prompt": "不要改变黑色短发、左腕旧气压表和深蓝橙救援服；不要夸张英雄姿态或增加军衔；不要增加其他人物、界面、文字、Logo、水印", "use_avatar_reference": true}
       }
     },
     "character_book": {

@@ -17,6 +17,7 @@ from ..sync_protocol import (
     MAX_SYNC_EVENTS,
     MAX_SYNC_MEDIA_BYTES,
     MAX_SYNC_PAYLOAD_BYTES,
+    SYNC_PROTOCOL_VERSION,
     bearer_credential,
     normalize_sync_url,
     utc_now,
@@ -162,7 +163,13 @@ class SyncHttpClient:
         )
 
     def pull(self, cursor: int, limit: int = MAX_SYNC_EVENTS) -> dict:
-        query = urlencode({"cursor": max(0, int(cursor)), "limit": limit})
+        query = urlencode(
+            {
+                "cursor": max(0, int(cursor)),
+                "limit": limit,
+                "protocol": SYNC_PROTOCOL_VERSION,
+            }
+        )
         return self._request_json(f"/v1/sync/pull?{query}")
 
     def upload_media(self, digest: str, content: bytes) -> None:
@@ -291,19 +298,31 @@ def _http_error_detail(exc: HTTPError) -> str:
 
 
 class SyncRepository:
-    """把现有 conversations/turns/characters 映射为同步实体。"""
+    """把本地会话、轮次、角色和治理记忆映射为同步实体。"""
 
     _TABLES = {
         "character": "characters",
         "conversation": "conversations",
         "turn": "turns",
+        "memory": "memories",
     }
-    _UPSERT_ORDER = {"character": 0, "conversation": 1, "turn": 2}
-    _DELETE_ORDER = {"turn": 3, "conversation": 4, "character": 5}
+    _UPSERT_ORDER = {
+        "character": 0,
+        "conversation": 1,
+        "turn": 2,
+        "memory": 3,
+    }
+    _DELETE_ORDER = {
+        "memory": 4,
+        "turn": 5,
+        "conversation": 6,
+        "character": 7,
+    }
     _MEDIA_FIELDS = {
         "character": ("avatar_path",),
         "conversation": ("avatar_override_path",),
         "turn": ("user_image_path", "assistant_image_path"),
+        "memory": (),
     }
 
     def __init__(self, database: Database) -> None:
@@ -321,7 +340,12 @@ class SyncRepository:
                 "UPDATE sync_runtime SET suppress_outbox = 1 WHERE id = 1"
             )
             connection.execute("DELETE FROM sync_outbox")
-            for entity_type in ("character", "conversation", "turn"):
+            for entity_type in (
+                "character",
+                "conversation",
+                "turn",
+                "memory",
+            ):
                 table = self._TABLES[entity_type]
                 rows = connection.execute(f"SELECT id FROM {table}").fetchall()
                 connection.executemany(
@@ -578,8 +602,10 @@ class SyncRepository:
             _upsert_character(connection, payload)
         elif entity_type == "conversation":
             _upsert_conversation(connection, payload)
-        else:
+        elif entity_type == "turn":
             _upsert_turn(connection, payload)
+        else:
+            _upsert_memory(connection, payload)
 
     def cursor(self) -> int:
         row = self._db.execute(
@@ -750,8 +776,18 @@ def _restore_segment_image_path(payload: dict, path: str) -> None:
 
 
 def _upsert_character(connection: sqlite3.Connection, payload: dict) -> None:
-    columns = ("id", "name", "avatar_path", "card_json", "created_at", "updated_at")
-    _upsert(connection, "characters", columns, payload)
+    compatible = dict(payload)
+    compatible.setdefault("source_type", "synced")
+    columns = (
+        "id",
+        "name",
+        "avatar_path",
+        "card_json",
+        "created_at",
+        "updated_at",
+        "source_type",
+    )
+    _upsert(connection, "characters", columns, compatible)
 
 
 def _upsert_conversation(connection: sqlite3.Connection, payload: dict) -> None:
@@ -792,6 +828,30 @@ def _upsert_turn(connection: sqlite3.Connection, payload: dict) -> None:
         "assistant_segments_json",
     )
     _upsert(connection, "turns", columns, payload)
+
+
+def _upsert_memory(connection: sqlite3.Connection, payload: dict) -> None:
+    columns = (
+        "id",
+        "conversation_id",
+        "character_id",
+        "category",
+        "content",
+        "source_type",
+        "source_turn_id",
+        "confidence",
+        "salience",
+        "status",
+        "pinned",
+        "created_at",
+        "updated_at",
+        "last_used_at",
+        "expires_at",
+        "superseded_by_id",
+        "confirmed_at",
+        "deleted_at",
+    )
+    _upsert(connection, "memories", columns, payload)
 
 
 def _upsert(

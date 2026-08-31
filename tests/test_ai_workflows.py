@@ -19,6 +19,8 @@ from deepseek_cli.desktop.data.repositories import (
 from deepseek_cli.desktop.model_discovery import ProviderModel, serialize_models
 from deepseek_cli.desktop.ui.main_window import MainWindow
 from deepseek_cli.gateway import Message, StreamDelta
+from deepseek_cli.multimodal import parse_vision_observation
+from deepseek_cli.roleplay_director import DIRECTOR_SYSTEM_PROMPT
 
 
 class FakeCredentials:
@@ -391,6 +393,76 @@ def test_main_window_routes_all_text_workflows_to_selected_grsai(
     database.close()
 
 
+def test_main_window_routes_auxiliary_text_to_independent_provider(
+    tmp_path, qtbot, monkeypatch
+):
+    database = Database(tmp_path / "aux-text.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("text_provider", "deepseek")
+    settings.set("aux_text_provider", "grsai")
+    settings.set("aux_grsai_text_model", "auxiliary-chat")
+    settings.set("grsai_text_base_url", "https://grsaiapi.com/v1")
+    chats.create_conversation("deepseek-v4-pro")
+    captured = {}
+    expected_gateway = object()
+
+    def gateway_factory(api_key, **kwargs):
+        captured["api_key"] = api_key
+        captured["kwargs"] = kwargs
+        return expected_gateway
+
+    monkeypatch.setattr(main_window_module, "GrsAiGateway", gateway_factory)
+    window = MainWindow(chats, characters, settings, FakeCredentials())
+    qtbot.addWidget(window)
+
+    assert window._text_provider() == "deepseek"
+    assert window._text_api_key() == "test-key"
+    assert window._resolved_aux_text_provider() == "grsai"
+    assert window._aux_text_api_key() == "grsai-text-test-key"
+    assert window._aux_text_model("deepseek-v4-pro") == "deepseek-v4-flash"
+    service = window._create_aux_text_service(window._aux_text_api_key())
+    assert service is not None
+    assert captured == {
+        "api_key": "grsai-text-test-key",
+        "kwargs": {
+            "base_url": "https://grsaiapi.com/v1",
+            "model": "auxiliary-chat",
+        },
+    }
+
+    window.close()
+    database.close()
+
+
+def test_auxiliary_text_missing_credential_falls_back_to_main_route(
+    tmp_path, qtbot
+):
+    class MissingGrsCredentials(FakeCredentials):
+        def get_grsai_text_api_key(self):
+            return ""
+
+    database = Database(tmp_path / "aux-fallback.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("text_provider", "deepseek")
+    settings.set("aux_text_provider", "grsai")
+    chats.create_conversation("deepseek-v4-pro")
+    window = MainWindow(
+        chats, characters, settings, MissingGrsCredentials()
+    )
+    qtbot.addWidget(window)
+
+    assert window._resolved_aux_text_provider() == "deepseek"
+    assert window._aux_text_api_key() == "test-key"
+    assert window._aux_text_model("deepseek-v4-pro") == "deepseek-v4-pro"
+
+    window.close()
+    database.close()
+
+
 def test_grsai_roleplay_sampling_uses_actual_cached_model_capability(
     tmp_path, qtbot
 ):
@@ -548,14 +620,14 @@ def test_new_character_conversation_ai_opening_clears_template(
     assert window._conversation_id == conversation_id
     assert window.chat_page.conversation_id == conversation_id
 
-    # 等待 AI 开场请求完成（proactive turn 落库）
+    # 等待 AI 开场请求完成（opening turn 落库，不占主动消息额度）
     qtbot.waitUntil(
         lambda: len(chats.list_turns(conversation_id)) == 1
         and chats.list_turns(conversation_id)[-1].status == "completed",
         timeout=5_000,
     )
     turn = chats.list_turns(conversation_id)[-1]
-    assert turn.origin == "proactive"
+    assert turn.origin == "opening"
     assert turn.assistant_content.startswith("晚上好")
     opening_calls = [
         messages for messages, prompt in calls if "## 首次开场" in prompt
@@ -781,6 +853,196 @@ def test_streamed_answer_stays_hidden_until_local_classification(
     database.close()
 
 
+def test_adaptive_director_keeps_daily_turn_single_call_and_hides_plan(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "director.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("roleplay_director_enabled", "true")
+    settings.set("autonomous_images_enabled", "false")
+    card = empty_card("导演测试角色")
+    card["data"]["personality"] = "会具体回应冲突，不用模板道歉。"
+    character = characters.create(card)
+    conversation = chats.create_conversation(character_id=character.id)
+    calls = []
+    beat = (
+        '{"trigger_event":"用户指出角色没有认真倾听",'
+        '"emotion_direction":"rise","character_goal":"repair",'
+        '"stance":"vulnerable","relationship_direction":"repair",'
+        '"content_form":"mixed","advancement":"承认具体疏忽并暂停辩解"}'
+    )
+
+    class Gateway:
+        def stream_chat(
+            self,
+            _model,
+            messages,
+            *,
+            system_prompt="",
+            **_options,
+        ):
+            calls.append((system_prompt, tuple(messages)))
+            if system_prompt == DIRECTOR_SYSTEM_PROMPT:
+                yield StreamDelta(content=beat)
+                return
+            has_director_context = any(
+                message.role == "system"
+                and "本轮已校验隐藏节拍" in message.content
+                for message in messages
+            )
+            if has_director_context:
+                yield StreamDelta(
+                    content=f"```json\n{beat}\n```\n这次是我没听完。"
+                )
+            else:
+                yield StreamDelta(content="早上好，我刚泡好一杯茶。")
+
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: Gateway(),
+        background_jobs_enabled=False,
+    )
+    qtbot.addWidget(window)
+
+    window._send("早上好")
+    qtbot.waitUntil(
+        lambda: window._thread is None and window._delivery is None,
+        timeout=5_000,
+    )
+    assert sum(system == DIRECTOR_SYSTEM_PROMPT for system, _ in calls) == 0
+    assert sum("## 角色演绎原则" in system for system, _ in calls) == 1
+
+    window._send("你刚才根本没听我说话，我很失望。")
+    qtbot.waitUntil(
+        lambda: len(chats.list_turns(conversation.id)) == 2
+        and chats.list_turns(conversation.id)[1].status == "completed"
+        and window._thread is None
+        and window._delivery is None,
+        timeout=6_000,
+    )
+
+    assert sum(system == DIRECTOR_SYSTEM_PROMPT for system, _ in calls) == 1
+    assert sum("## 角色演绎原则" in system for system, _ in calls) == 2
+    answer = chats.list_turns(conversation.id)[1].assistant_content
+    assert answer == "这次是我没听完。"
+    assert "trigger_event" not in answer
+    assert "隐藏" not in answer
+
+    window.close()
+    database.close()
+
+
+def test_new_user_message_cancels_inflight_generation_before_starting_next(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "cancel-next.db")
+    chats = ChatRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("autonomous_images_enabled", "false")
+    conversation = chats.create_conversation()
+    started = Event()
+    release = Event()
+    calls = []
+
+    class Gateway:
+        def stream_chat(self, _model, messages, **_options):
+            calls.append(messages[-1].content)
+            if len(calls) == 1:
+                yield StreamDelta(content="旧回复片段")
+                started.set()
+                release.wait(2)
+                yield StreamDelta(content="不应完成")
+                return
+            yield StreamDelta(content="这是新一轮回复。")
+
+    window = MainWindow(
+        chats,
+        CharacterRepository(database),
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: Gateway(),
+        background_jobs_enabled=False,
+    )
+    qtbot.addWidget(window)
+
+    window._send("旧问题")
+    qtbot.waitUntil(started.is_set, timeout=3_000)
+    window._send("新问题")
+    release.set()
+    qtbot.waitUntil(
+        lambda: len(chats.list_turns(conversation.id)) == 2
+        and chats.list_turns(conversation.id)[1].status == "completed"
+        and window._thread is None
+        and window._delivery is None,
+        timeout=6_000,
+    )
+
+    turns = chats.list_turns(conversation.id)
+    assert [turn.status for turn in turns] == ["cancelled", "completed"]
+    assert turns[1].user_content == "新问题"
+    assert turns[1].assistant_content == "这是新一轮回复。"
+    assert calls[:2] == ["旧问题", "新问题"]
+
+    window.close()
+    database.close()
+
+
+def test_switching_conversation_cancels_inflight_generation(tmp_path, qtbot):
+    database = Database(tmp_path / "cancel-switch.db")
+    chats = ChatRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("autonomous_images_enabled", "false")
+    first = chats.create_conversation(title="第一会话")
+    second = chats.create_conversation(title="第二会话")
+    started = Event()
+    release = Event()
+
+    class Gateway:
+        def stream_chat(self, _model, _messages, **_options):
+            yield StreamDelta(content="旧会话回复片段")
+            started.set()
+            release.wait(2)
+            yield StreamDelta(content="不应跨会话显示")
+
+    window = MainWindow(
+        chats,
+        CharacterRepository(database),
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: Gateway(),
+        background_jobs_enabled=False,
+    )
+    qtbot.addWidget(window)
+    window._open_conversation(first.id)
+
+    window._send("第一会话的问题")
+    qtbot.waitUntil(started.is_set, timeout=3_000)
+    window._open_conversation(second.id)
+    release.set()
+    qtbot.waitUntil(
+        lambda: window._thread is None
+        and window._conversation_id == second.id
+        and window.chat_page.conversation_id == second.id,
+        timeout=5_000,
+    )
+
+    assert chats.list_turns(first.id)[0].status == "cancelled"
+    assert chats.list_turns(second.id) == []
+    assert all(
+        bubble.text_label is None
+        or "不应跨会话显示" not in bubble.text_label.text()
+        for bubble in window.chat_page._message_bubbles()
+    )
+
+    window.close()
+    database.close()
+
+
 def test_main_window_generates_summary_and_proactive_assistant_turn(
     tmp_path, qtbot
 ):
@@ -788,6 +1050,10 @@ def test_main_window_generates_summary_and_proactive_assistant_turn(
     chats = ChatRepository(database)
     characters = CharacterRepository(database)
     settings = SettingsRepository(database)
+    settings.set("proactive_enabled", "true")
+    settings.set("proactive_frequency", "high")
+    settings.set("proactive_quiet_start", "00:00")
+    settings.set("proactive_quiet_end", "00:00")
     card = empty_card("测试角色")
     card["data"]["description"] = "善于调查的测试角色。"
     character = characters.create(card)
@@ -828,6 +1094,12 @@ def test_main_window_generates_summary_and_proactive_assistant_turn(
         Message("assistant", "这是需要完整保留在聊天详情中的角色回复。"),
     ]
 
+    with database.connection:
+        database.connection.execute(
+            "UPDATE turns SET created_at = '2000-01-01T00:00:00+00:00' "
+            "WHERE conversation_id = ?",
+            (conversation.id,),
+        )
     window._send_proactive_message()
     qtbot.waitUntil(
         lambda: len(chats.list_turns(conversation.id)) == 2
@@ -847,6 +1119,84 @@ def test_main_window_generates_summary_and_proactive_assistant_turn(
     )
     assert notification.play_count == 2
 
+    window.close()
+    database.close()
+
+
+def test_disabled_proactive_messages_do_not_start_text_model(tmp_path, qtbot):
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    character = characters.create(empty_card("安静角色"))
+    conversation = chats.create_conversation(
+        title=character.name, character_id=character.id
+    )
+    calls = []
+
+    class CountingGateway:
+        def stream_chat(self, *_args, **_kwargs):
+            calls.append(True)
+            yield StreamDelta(content="不应生成")
+
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: CountingGateway(),
+    )
+    qtbot.addWidget(window)
+
+    window._send_proactive_message()
+
+    assert calls == []
+    assert chats.list_turns(conversation.id) == []
+    assert "总开关已关闭" in settings.get(
+        f"proactive_last_status_{character.id}"
+    )
+    window.close()
+    database.close()
+
+
+def test_repeated_proactive_answer_is_discarded_before_delivery(tmp_path, qtbot):
+    database = Database(tmp_path / "chat.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    character = characters.create(empty_card("去重角色"))
+    conversation = chats.create_conversation(
+        title=character.name, character_id=character.id
+    )
+    previous = chats.create_proactive_turn(conversation.id, "model")
+    chats.complete_turn(
+        previous.id,
+        "午休时看到一只很神气的橘猫，占着长椅不让人坐。",
+    )
+    current = chats.create_proactive_turn(conversation.id, "model")
+    window = MainWindow(
+        chats,
+        characters,
+        settings,
+        FakeCredentials(),
+        gateway_factory=lambda _key: FeatureGateway(),
+        background_jobs_enabled=False,
+    )
+    qtbot.addWidget(window)
+
+    window._on_turn_completed(
+        conversation.id,
+        current.id,
+        "午休时看到一只神气的橘猫，占着长椅不让人坐。",
+        "",
+        "proactive",
+    )
+
+    assert chats.get_turn(conversation.id, current.id) is None
+    assert len(chats.list_turns(conversation.id)) == 1
+    assert "过于相似" in settings.get(
+        f"proactive_last_status_{character.id}"
+    )
     window.close()
     database.close()
 
@@ -1106,10 +1456,10 @@ def test_main_window_understands_user_image_and_character_autonomously_shares_im
             return "蓝色天空下有一排城市建筑。"
 
         def generate_image(self, prompt):
-            assert prompt == (
-                "现代都市雨后傍晚，短发成年女设计师站在亮灯花店门口，"
-                "手里拿着一束花，暖色生活摄影感"
-            )
+            assert "现代都市雨后傍晚" in prompt
+            assert "短发成年女设计师" in prompt
+            assert "稳定视觉身份：" in prompt
+            assert "负面约束：" in prompt
             return generated.read_bytes()
 
     class Gateway:
@@ -1145,7 +1495,7 @@ def test_main_window_understands_user_image_and_character_autonomously_shares_im
                     )
                 )
             else:
-                yield StreamDelta(content="天空很蓝，像是刚下过雨。")
+                yield StreamDelta(content="我刚拍下窗边的那点暮色了，给你看看。")
 
     gateway = Gateway()
     notification = FakeNotificationSound()
@@ -1175,7 +1525,9 @@ def test_main_window_understands_user_image_and_character_autonomously_shares_im
     assert first.status == "completed"
     assert first.user_image_path
     assert (tmp_path / "appdata") in Path(first.user_image_path).parents
-    assert first.user_image_description == "蓝色天空下有一排城市建筑。"
+    observation = parse_vision_observation(first.user_image_description)
+    assert observation.summary == "蓝色天空下有一排城市建筑。"
+    assert observation.confidence < 0.65
     chat_requests = [
         messages
         for messages, system in gateway.calls
@@ -1187,7 +1539,7 @@ def test_main_window_understands_user_image_and_character_autonomously_shares_im
     assert len(chats.list_turns(conversation.id)) == 1
     generated_turn = chats.list_turns(conversation.id)[0]
     assert generated_turn.origin == "user"
-    assert generated_turn.assistant_content == "天空很蓝，像是刚下过雨。"
+    assert generated_turn.assistant_content == "我刚拍下窗边的那点暮色了，给你看看。"
     assert generated_turn.assistant_image_path
     assert Path(generated_turn.assistant_image_path).is_file()
     assert "[助手生成了一张图片。]" in chats.completed_history(
@@ -1378,12 +1730,12 @@ def test_role_reply_is_hidden_then_delivered_as_typed_segments_and_image(
     assert segments[2].image_path == turn.assistant_image_path
     assert "发送图片" not in turn.assistant_content
     assert any("自主分享图片" in prompt for prompt in gateway.prompts)
-    assert len(speech.calls) == 1
-    assert speech.calls[0][1] == (
-        "刚下班，我正好赶上今天的晚霞。\n"
-        "你看，云边像被点亮了一样。"
-    )
-    assert "走到窗边" not in speech.calls[0][1]
+    assert len(speech.calls) == 2
+    assert [call[1] for call in speech.calls] == [
+        "刚下班，我正好赶上今天的晚霞。",
+        "你看，云边像被点亮了一样。",
+    ]
+    assert all("走到窗边" not in call[1] for call in speech.calls)
     visible_texts = [
         widget.text_label.text()
         for widget in window.chat_page._message_bubbles()

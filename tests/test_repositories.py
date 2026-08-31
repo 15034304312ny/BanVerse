@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
+
+import pytest
 
 from deepseek_cli.character_cards import empty_card
 from deepseek_cli.desktop.data.database import Database
@@ -25,8 +28,12 @@ def test_database_migrates_summary_media_and_sticker_columns(tmp_path):
         row["name"]
         for row in database.connection.execute("PRAGMA table_info(turns)")
     }
+    character_columns = {
+        row["name"]
+        for row in database.connection.execute("PRAGMA table_info(characters)")
+    }
 
-    assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 9
     assert {
         "ai_summary",
         "summary_status",
@@ -40,6 +47,7 @@ def test_database_migrates_summary_media_and_sticker_columns(tmp_path):
         "assistant_segments_json",
         "user_sticker",
     } <= turn_columns
+    assert "source_type" in character_columns
     sync_tables = {
         row["name"]
         for row in database.connection.execute(
@@ -58,11 +66,13 @@ def test_database_migrates_summary_media_and_sticker_columns(tmp_path):
         "sync_state",
         "sync_entities",
         "sync_conflicts",
+        "memories",
     } <= sync_tables
     assert {
         "sync_conversations_insert",
         "sync_turns_update",
         "sync_characters_delete",
+        "sync_memories_update",
     } <= sync_triggers
     database.close()
 
@@ -106,7 +116,147 @@ def test_existing_v2_database_is_upgraded_without_losing_conversations(tmp_path)
     ).fetchone()
 
     assert tuple(row) == ("旧会话", "", "none")
-    assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert database.connection.execute("PRAGMA user_version").fetchone()[0] == 9
+    backup = path.with_suffix(path.suffix + ".pre-v2.bak")
+    assert backup.is_file()
+    with closing(sqlite3.connect(backup)) as restored:
+        assert restored.execute("PRAGMA user_version").fetchone()[0] == 2
+    database.close()
+
+
+def test_failed_migration_restores_pre_upgrade_backup(tmp_path, monkeypatch):
+    path = tmp_path / "rollback.db"
+    database = Database(path)
+    ChatRepository(database).create_conversation(title="必须保留")
+    database.close()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA user_version = 8")
+        connection.commit()
+
+    def fail_v9(_self):
+        raise RuntimeError("模拟迁移失败")
+
+    monkeypatch.setattr(Database, "_migrate_v9", fail_v9)
+    with pytest.raises(RuntimeError, match="模拟迁移失败"):
+        Database(path)
+
+    with closing(sqlite3.connect(path)) as restored:
+        assert restored.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert restored.execute(
+            "SELECT title FROM conversations"
+        ).fetchone()[0] == "必须保留"
+
+
+def test_governed_memories_track_source_confirmation_and_erased_deletion(
+    tmp_path,
+):
+    database = Database(tmp_path / "memories.db")
+    characters = CharacterRepository(database)
+    chats = ChatRepository(database)
+    character = characters.create(empty_card("记忆角色"))
+    conversation = chats.create_conversation(character_id=character.id)
+    turn = chats.create_turn(conversation.id, "我喜欢蓝色", MODEL_CHAT)
+    chats.complete_turn(turn.id, "我记住啦。")
+
+    chats.upsert_role_memories(
+        conversation.id,
+        turn.id,
+        "我喜欢蓝色",
+        {
+            "user_facts": ["用户喜欢蓝色", "用户住在火星"],
+            "shared_memories": ["一起聊过蓝色的海"],
+            "open_threads": ["下次继续选旅行地点"],
+            "relationship": {"boundaries": ["不要催促回复"]},
+        },
+    )
+    records = chats.list_memories(conversation.id)
+    by_content = {record.content: record for record in records}
+
+    assert by_content["用户喜欢蓝色"].status == "active"
+    assert by_content["用户喜欢蓝色"].source_type == "user_explicit"
+    assert by_content["用户住在火星"].status == "candidate"
+    assert by_content["用户住在火星"].source_type == "assistant_inferred"
+    assert by_content["一起聊过蓝色的海"].status == "active"
+    recalled = chats.recalled_memories(
+        conversation.id, "蓝色", exclude_recent_turns=12
+    )
+    assert any("用户喜欢蓝色" in item for item in recalled)
+    assert all("火星" not in item for item in recalled)
+
+    chats.delete_memory(by_content["用户喜欢蓝色"].id)
+    deleted = chats.get_memory(by_content["用户喜欢蓝色"].id)
+    assert deleted is not None
+    assert deleted.status == "deleted"
+    assert deleted.content == ""
+    assert deleted.deleted_at
+    database.close()
+
+
+def test_character_sources_are_persisted_and_validated(tmp_path):
+    database = Database(tmp_path / "character-sources.db")
+    characters = CharacterRepository(database)
+
+    imported = characters.create(
+        empty_card("导入角色"), source_type="imported"
+    )
+
+    assert imported.source_type == "imported"
+    with pytest.raises(ValueError, match="未知角色来源"):
+        characters.create(empty_card("未知来源"), source_type="network_guess")
+    database.close()
+
+
+def test_explicit_user_correction_supersedes_conflicting_memory(tmp_path):
+    database = Database(tmp_path / "memory-correction.db")
+    chats = ChatRepository(database)
+    conversation = chats.create_conversation()
+    old = chats.create_memory(
+        conversation.id, "user_fact", "用户喜欢咖啡"
+    )
+    turn = chats.create_turn(
+        conversation.id, "其实我不再喜欢咖啡，我改喝茶了", MODEL_CHAT
+    )
+    chats.complete_turn(turn.id, "知道了。")
+
+    chats.upsert_role_memories(
+        conversation.id,
+        turn.id,
+        "其实我不再喜欢咖啡，我改喝茶了",
+        {"user_facts": ["用户不再喜欢咖啡，改喝茶"]},
+    )
+
+    old_after = chats.get_memory(old.id)
+    replacement = next(
+        memory
+        for memory in chats.list_memories(conversation.id)
+        if "改喝茶" in memory.content
+    )
+    assert old_after is not None
+    assert old_after.status == "superseded"
+    assert old_after.superseded_by_id == replacement.id
+    assert replacement.status == "active"
+    database.close()
+
+
+def test_memory_limit_prunes_only_unpinned_records(tmp_path):
+    database = Database(tmp_path / "memory-limit.db")
+    chats = ChatRepository(database)
+    conversation = chats.create_conversation()
+    pinned = chats.create_memory(
+        conversation.id, "user_fact", "固定事实"
+    )
+    chats.update_memory(pinned.id, pinned=True)
+    for index in range(14):
+        chats.create_memory(
+            conversation.id,
+            "open_thread",
+            f"未完话题 {index}",
+        )
+    chats._prune_memories(conversation.id, max_items=10)  # noqa: SLF001
+
+    active = chats.list_memories(conversation.id, include_inactive=False)
+    assert any(memory.id == pinned.id for memory in active)
+    assert len(active) == 11
     database.close()
 
 
@@ -454,4 +604,77 @@ def test_generated_image_path_is_written_to_the_planned_image_segment(tmp_path):
     restored = json.loads(saved.assistant_segments_json)
     assert saved.assistant_image_path == "generated/sunset.png"
     assert restored[1]["image_path"] == "generated/sunset.png"
+    database.close()
+
+
+def test_image_event_is_idempotent_and_tracks_retry_status(tmp_path):
+    database = Database(tmp_path / "chat.db")
+    repository = ChatRepository(database)
+    conversation = repository.create_conversation()
+    turn = repository.create_turn(conversation.id, "给我看看", MODEL_CHAT)
+    repository.complete_turn(
+        turn.id,
+        "我这就发给你。",
+        assistant_segments_json=json.dumps(
+            [
+                {"kind": "dialogue", "text": "我这就发给你。"},
+                {
+                    "kind": "image",
+                    "prompt": "原始提示词",
+                    "event_id": "event-old",
+                    "status": "pending",
+                },
+            ],
+            ensure_ascii=False,
+        ),
+    )
+
+    first_index = repository.ensure_assistant_image_event(
+        turn.id, "已补全的稳定身份提示词", "event-stable"
+    )
+    second_index = repository.ensure_assistant_image_event(
+        turn.id, "已补全的稳定身份提示词", "event-stable"
+    )
+    repository.set_assistant_image_status(
+        turn.id,
+        "failed",
+        "image_timeout",
+        segment_index=first_index,
+    )
+
+    saved = repository.get_turn(conversation.id, turn.id)
+    assert saved is not None
+    segments = json.loads(saved.assistant_segments_json)
+    images = [item for item in segments if item["kind"] == "image"]
+    assert first_index == second_index == 1
+    assert len(images) == 1
+    assert images[0]["prompt"] == "已补全的稳定身份提示词"
+    assert images[0]["event_id"] == "event-stable"
+    assert images[0]["status"] == "failed"
+    assert images[0]["error_code"] == "image_timeout"
+
+    repository.ensure_assistant_image_event(
+        turn.id, "已补全的稳定身份提示词", "event-stable"
+    )
+    retried = repository.get_turn(conversation.id, turn.id)
+    assert retried is not None
+    retry_image = next(
+        item
+        for item in json.loads(retried.assistant_segments_json)
+        if item["kind"] == "image"
+    )
+    assert retry_image["status"] == "pending"
+    assert retry_image["error_code"] == ""
+    repository.set_assistant_image_status(
+        turn.id, "cancelled", segment_index=first_index
+    )
+    cancelled = repository.get_turn(conversation.id, turn.id)
+    assert cancelled is not None
+    cancelled_image = next(
+        item
+        for item in json.loads(cancelled.assistant_segments_json)
+        if item["kind"] == "image"
+    )
+    assert cancelled_image["status"] == "cancelled"
+    assert cancelled_image["error_code"] == ""
     database.close()

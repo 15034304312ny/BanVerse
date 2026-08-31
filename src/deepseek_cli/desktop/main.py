@@ -14,7 +14,8 @@ from PySide6.QtCore import QCoreApplication, QStandardPaths, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from ..branding import PRODUCT_NAME
+from ..branding import PRODUCT_NAME, PRODUCT_VERSION
+from ..diagnostics import DiagnosticRecorder
 from .platform import is_android_platform
 
 LOGGER = logging.getLogger("banverse.startup")
@@ -122,6 +123,7 @@ def _initialize_optional_audio(
     window,
     settings,
     credentials,
+    diagnostics: DiagnosticRecorder | None = None,
 ) -> None:
     """Initialize TTS and notification audio without risking the chat window."""
 
@@ -134,6 +136,7 @@ def _initialize_optional_audio(
             application,
             settings=settings,
             credentials=credentials,
+            diagnostics=diagnostics,
         )
         application.aboutToQuit.connect(speech.shutdown)
     except Exception:
@@ -191,6 +194,11 @@ def main() -> int:
     smoke_exit_timer = None
     data_root = app_data_path()
     log_path = configure_startup_logging(data_root)
+    diagnostics = DiagnosticRecorder(
+        data_root / "diagnostics",
+        app_version=PRODUCT_VERSION,
+        platform_name=sys.platform,
+    )
     LOGGER.info("Smoke test mode=%s", smoke_test)
     try:
         # Delay application-specific and optional native module imports until a
@@ -216,6 +224,7 @@ def main() -> int:
             credentials,
             database.path,
             data_root,
+            diagnostics=diagnostics,
             parent=application,
         )
         builtins = BuiltinCharacterManager(
@@ -236,6 +245,7 @@ def main() -> int:
             media_root=data_root,
             background_jobs_enabled=not smoke_test,
             sync_controller=sync_controller,
+            diagnostics=diagnostics,
         )
         application.aboutToQuit.connect(window.shutdown)
         if android:
@@ -251,6 +261,7 @@ def main() -> int:
                     window,
                     settings,
                     credentials,
+                    diagnostics,
                 ),
             )
         else:

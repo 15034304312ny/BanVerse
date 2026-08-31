@@ -26,6 +26,14 @@ from PySide6.QtCore import QObject, Signal, Slot
 from ..chat_service import ChatEventType, ChatStreamService
 from ..error_codes import image_error_code
 from ..gateway import Message
+from ..multimodal import normalize_vision_observation
+from ..roleplay_director import (
+    DIRECTOR_SYSTEM_PROMPT,
+    DirectorRequest,
+    actor_director_context,
+    parse_director_beat,
+    strip_director_leak,
+)
 from .assets import install_generated_image
 from .image_service import image_context
 from .index_tts2 import index_tts2_endpoint
@@ -46,6 +54,7 @@ class ChatWorker(QObject):
     failed = Signal(str)
     image_described = Signal(str)
     image_analysis_failed = Signal(str)
+    director_finished = Signal(str)
     finished = Signal()
 
     def __init__(
@@ -59,8 +68,13 @@ class ChatWorker(QObject):
         example_messages: Sequence[Message] = (),
         post_history_prompt: str = "",
         temperature: float | None = None,
+        top_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        repetition_penalty: float | None = None,
         image_service=None,
         image_path: str = "",
+        director_request: DirectorRequest | None = None,
     ) -> None:
         super().__init__()
         self._service = service
@@ -71,8 +85,13 @@ class ChatWorker(QObject):
         self._example_messages = list(example_messages)
         self._post_history_prompt = post_history_prompt
         self._temperature = temperature
+        self._top_p = top_p
+        self._frequency_penalty = frequency_penalty
+        self._presence_penalty = presence_penalty
+        self._repetition_penalty = repetition_penalty
         self._image_service = image_service
         self._image_path = image_path
+        self._director_request = director_request
         self._cancel_event = Event()
 
     @Slot()
@@ -89,8 +108,23 @@ class ChatWorker(QObject):
                     except Exception as exc:
                         self.image_analysis_failed.emit(self._error_code(exc))
                     else:
+                        description = normalize_vision_observation(description)
                         self.image_described.emit(description)
                 request_text = image_context(self._user_text, description)
+            director_context = ""
+            if self._director_request is not None:
+                director_context, director_status = self._run_director()
+                self.director_finished.emit(director_status)
+                if self._cancel_event.is_set():
+                    self.cancelled.emit()
+                    return
+            post_history_prompt = self._post_history_prompt
+            if director_context:
+                post_history_prompt = "\n\n".join(
+                    part
+                    for part in (post_history_prompt, director_context)
+                    if part.strip()
+                )
             for event in self._service.stream(
                 self._model,
                 self._history,
@@ -98,21 +132,74 @@ class ChatWorker(QObject):
                 cancel_event=self._cancel_event,
                 system_prompt=self._system_prompt,
                 example_messages=self._example_messages,
-                post_history_prompt=self._post_history_prompt,
+                post_history_prompt=post_history_prompt,
                 temperature=self._temperature,
+                top_p=self._top_p,
+                frequency_penalty=self._frequency_penalty,
+                presence_penalty=self._presence_penalty,
+                repetition_penalty=self._repetition_penalty,
             ):
                 if event.type is ChatEventType.REASONING:
-                    self.reasoning.emit(event.text)
+                    if not director_context:
+                        self.reasoning.emit(event.text)
                 elif event.type is ChatEventType.CONTENT:
-                    self.content.emit(event.text)
+                    if not director_context:
+                        self.content.emit(event.text)
                 elif event.type is ChatEventType.COMPLETED:
-                    self.completed.emit(event.text)
+                    answer = (
+                        strip_director_leak(event.text)
+                        if director_context
+                        else event.text
+                    )
+                    if not answer.strip():
+                        self.failed.emit("empty_response")
+                    else:
+                        if director_context:
+                            self.content.emit(answer)
+                        self.completed.emit(answer)
                 elif event.type is ChatEventType.CANCELLED:
                     self.cancelled.emit()
                 else:
                     self.failed.emit(event.error_code)
         finally:
             self.finished.emit()
+
+    def _run_director(self) -> tuple[str, str]:
+        request = self._director_request
+        if request is None:
+            return "", "skipped"
+        deadline = time.monotonic() + max(
+            1.0, min(float(request.timeout_seconds), 30.0)
+        )
+        answer = ""
+        for event in request.service.stream(
+            request.model,
+            (),
+            request.request_text,
+            cancel_event=self._cancel_event,
+            system_prompt=DIRECTOR_SYSTEM_PROMPT,
+            temperature=request.temperature,
+            top_p=request.top_p,
+        ):
+            if self._cancel_event.is_set():
+                return "", "cancelled"
+            if time.monotonic() > deadline:
+                return "", "timeout"
+            if event.type is ChatEventType.CONTENT:
+                answer += event.text
+                if len(answer) > 4_000:
+                    return "", "invalid"
+            elif event.type is ChatEventType.COMPLETED:
+                try:
+                    beat = parse_director_beat(event.text or answer)
+                except ValueError:
+                    return "", "invalid"
+                return actor_director_context(beat), "used"
+            elif event.type is ChatEventType.CANCELLED:
+                return "", "cancelled"
+            elif event.type is ChatEventType.ERROR:
+                return "", "error"
+        return "", "error"
 
     def cancel(self) -> None:
         self._cancel_event.set()

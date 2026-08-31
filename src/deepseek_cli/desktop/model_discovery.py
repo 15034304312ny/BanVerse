@@ -26,6 +26,9 @@ class ProviderModel:
     id: str
     capabilities: tuple[str, ...]
     description: str = ""
+    streaming: bool = True
+    context_length: int | None = None
+    sampling_parameters: tuple[str, ...] = ()
 
     def supports(self, capability: str) -> bool:
         return capability in self.capabilities
@@ -39,6 +42,17 @@ class ProviderModel:
             badges.append("推理")
         suffix = f"  [{' · '.join(badges)}]" if badges else ""
         return f"{self.id}{suffix}"
+
+    @property
+    def capability_summary(self) -> str:
+        parts = ["流式" if self.streaming else "非流式"]
+        if self.context_length:
+            parts.append(f"上下文 {self.context_length:,}")
+        else:
+            parts.append("上下文长度未声明")
+        sampling = "/".join(self.sampling_parameters)
+        parts.append(f"采样 {sampling}" if sampling else "平台默认采样")
+        return " · ".join(parts)
 
 
 class ModelDiscoveryError(RuntimeError):
@@ -79,6 +93,19 @@ def deserialize_models(value: str) -> tuple[ProviderModel, ...]:
                     if str(capability).strip()
                 ),
                 str(item.get("description") or "").strip(),
+                bool(item.get("streaming", True)),
+                (
+                    int(item["context_length"])
+                    if isinstance(item.get("context_length"), int)
+                    else None
+                ),
+                tuple(
+                    str(parameter)
+                    for parameter in item.get("sampling_parameters", [])
+                    if str(parameter).strip()
+                )
+                if isinstance(item.get("sampling_parameters", []), list)
+                else (),
             )
         )
     return tuple(models)
@@ -249,8 +276,23 @@ class ProviderModelCatalog:
                 capabilities.append("chat")
                 if lowered.startswith("gemini-"):
                     capabilities.append("vision")
+        context_length = None
+        for key in ("context_length", "contextLength", "max_context_tokens"):
+            value = record.get(key)
+            if isinstance(value, int) and value > 0:
+                context_length = value
+                break
+        sampling_parameters = (
+            () if "reasoning" in capabilities else ("temperature",)
+        )
         return ProviderModel(
-            "grsai", model_id, tuple(capabilities), description
+            "grsai",
+            model_id,
+            tuple(capabilities),
+            description,
+            True,
+            context_length,
+            sampling_parameters,
         )
 
     @staticmethod

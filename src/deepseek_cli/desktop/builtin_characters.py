@@ -14,6 +14,7 @@ from PySide6.QtCore import QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QImageReader
 
 from ..character_cards import CharacterCardError, dump_card, parse_card_json
+from ..multimodal import read_visual_identity
 from ..tts import read_tts_profile
 from .assets import AvatarError, install_builtin_avatar
 from .data.database import Database
@@ -140,6 +141,9 @@ def _validate_definition(builtin_id: str, card: dict, avatar_png: bytes) -> None
     if not data.get("character_book", {}).get("entries"):
         raise BuiltinCharacterError("内置角色缺少 Character Book。")
     profile = read_tts_profile(card)
+    identity = read_visual_identity(card)
+    if not identity.description or not identity.negative_prompt:
+        raise BuiltinCharacterError("内置角色缺少稳定视觉身份或负面约束。")
     if "男性" in data["tags"] and profile.voice not in _MALE_VOICES:
         raise BuiltinCharacterError("男性内置角色必须使用男性音色。")
 
@@ -179,6 +183,12 @@ class BuiltinCharacterManager:
                 marker = seed_setting_key(definition.builtin_id)
                 if self._settings.contains(marker, connection=connection):
                     current = self._characters.get(definition.character_id)
+                    if current is not None and current.source_type != "built_in":
+                        self._characters.set_source_type(
+                            definition.character_id,
+                            "built_in",
+                            connection=connection,
+                        )
                     previous_fingerprint = self._settings.get(marker)
                     if (
                         current is not None
@@ -214,6 +224,7 @@ class BuiltinCharacterManager:
                         definition.character_id,
                         definition.card,
                         avatar_paths[definition.builtin_id],
+                        source_type="built_in",
                         connection=connection,
                     )
                     created.append(definition.character_id)
@@ -285,6 +296,11 @@ class BuiltinCharacterManager:
             for definition in definitions:
                 if self._characters.exists(definition.character_id, connection=connection):
                     existing.append(definition.character_id)
+                    self._characters.set_source_type(
+                        definition.character_id,
+                        "built_in",
+                        connection=connection,
+                    )
                     self._migrate_index_tts2_preset(
                         definition,
                         self._characters.get(definition.character_id),
@@ -295,6 +311,7 @@ class BuiltinCharacterManager:
                     definition.character_id,
                     definition.card,
                     avatar_paths[definition.builtin_id],
+                    source_type="built_in",
                     connection=connection,
                 )
                 self._settings.set(

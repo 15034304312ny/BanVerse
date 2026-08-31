@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "policy": {
+    "default_ci_network": false,
+    "credentials_required_for_live_smoke": true,
+    "missing_credentials_result": "skipped",
+    "record_prompt_or_response": false
+  },
+  "cases": [
+    {
+      "id": "deepseek-text",
+      "provider": "deepseek",
+      "capability": "text",
+      "model_source": "conversation.model",
+      "default_model": "deepseek-chat",
+      "checks": ["stream", "cancel", "error_mapping"]
+    },
+    {
+      "id": "grsai-text",
+      "provider": "grsai",
+      "capability": "text",
+      "model_source": "grsai_text_model",
+      "default_model": "gemini-3.1-flash-lite",
+      "checks": ["stream", "cancel", "error_mapping"]
+    },
+    {
+      "id": "siliconflow-image",
+      "provider": "siliconflow",
+      "capability": "image_generation",
+      "model_source": "siliconflow_image_model",
+      "default_model": "Tongyi-MAI/Z-Image-Turbo",
+      "checks": ["generate", "download", "error_mapping"]
+    },
+    {
+      "id": "siliconflow-vision",
+      "provider": "siliconflow",
+      "capability": "vision",
+      "model_source": "siliconflow_vision_model",
+      "default_model": "Qwen/Qwen3-VL-8B-Instruct",
+      "checks": ["describe", "error_mapping"]
+    },
+    {
+      "id": "grsai-image",
+      "provider": "grsai",
+      "capability": "image_generation",
+      "model_source": "grsai_image_model",
+      "default_model": "gpt-image-2",
+      "checks": ["submit", "poll", "download", "error_mapping"]
+    },
+    {
+      "id": "grsai-vision",
+      "provider": "grsai",
+      "capability": "vision",
+      "model_source": "grsai_vision_model",
+      "default_model": "gemini-3.1-flash-lite",
+      "checks": ["describe", "error_mapping"]
+    },
+    {
+      "id": "edge-tts",
+      "provider": "edge",
+      "capability": "tts",
+      "model_source": "edge_tts_voice",
+      "default_model": "auto",
+      "checks": ["synthesize", "playback", "cancel"]
+    },
+    {
+      "id": "xfyun-tts",
+      "provider": "xfyun",
+      "capability": "tts",
+      "model_source": "xfyun_tts_voice",
+      "default_model": "auto",
+      "checks": ["websocket_auth", "synthesize", "playback", "error_mapping"]
+    },
+    {
+      "id": "siliconflow-tts",
+      "provider": "siliconflow",
+      "capability": "tts",
+      "model_source": "siliconflow_tts_model",
+      "default_model": "FunAudioLLM/CosyVoice2-0.5B",
+      "checks": ["synthesize", "playback", "error_mapping"]
+    },
+    {
+      "id": "indextts2-local",
+      "provider": "indextts2",
+      "capability": "tts",
+      "model_source": "indextts2_preset",
+      "default_model": "auto",
+      "checks": ["health", "synthesize", "playback", "cancel"]
+    }
+  ]
+}

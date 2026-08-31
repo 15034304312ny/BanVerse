@@ -28,6 +28,7 @@ from deepseek_cli.desktop.ai_features import (
 from deepseek_cli.desktop.data.database import Database
 from deepseek_cli.desktop.data.repositories import SettingsRepository
 from deepseek_cli.gateway import Message
+from deepseek_cli.multimodal import read_visual_identity
 from deepseek_cli.time_context import local_time_context
 
 
@@ -96,10 +97,13 @@ def test_character_discovery_builds_safe_unique_v2_card():
 
     assert card["spec"] == "chara_card_v2"
     assert card["data"]["name"] == "顾遥"
-    assert card["data"]["extensions"]["deepseek_chat"] == {
-        "generated": True,
-        "source": "character_discovery",
-    }
+    app_extension = card["data"]["extensions"]["deepseek_chat"]
+    assert app_extension["generated"] is True
+    assert app_extension["source"] == "character_discovery"
+    identity = read_visual_identity(card)
+    assert "短发" in identity.description
+    assert identity.negative_prompt
+    assert identity.use_avatar_reference
     assert "索取用户隐私" not in card["data"]["system_prompt"]
     assert "尊重用户明确表达的边界" in card["data"]["system_prompt"]
 

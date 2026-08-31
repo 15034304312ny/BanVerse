@@ -547,9 +547,15 @@ class SyncServerStore:
                     (account_id, event["entity_type"], event["entity_id"]),
                 ).fetchone()
                 current_revision = int(current["revision"]) if current else 0
+                memory_tombstone = (
+                    event["entity_type"] == "memory"
+                    and event["operation"] == "upsert"
+                    and event["payload"].get("status") == "deleted"
+                )
                 conflict = (
                     event["operation"] != "delete"
                     and event["base_revision"] != current_revision
+                    and not memory_tombstone
                 )
                 if conflict and current is not None and self._same_entity_content(
                     current, event
@@ -634,7 +640,12 @@ class SyncServerStore:
         return {"cursor": int(cursor), "results": results}
 
     def pull(
-        self, account_id: str, cursor: int, limit: int = MAX_SYNC_EVENTS
+        self,
+        account_id: str,
+        cursor: int,
+        limit: int = MAX_SYNC_EVENTS,
+        *,
+        protocol_version: int = SYNC_PROTOCOL_VERSION,
     ) -> dict[str, Any]:
         safe_cursor = max(0, int(cursor))
         safe_limit = max(1, min(int(limit), MAX_SYNC_EVENTS))
@@ -646,7 +657,11 @@ class SyncServerStore:
             ).fetchall()
         events: list[dict[str, Any]] = []
         encoded_size = 2
+        scanned_cursor = safe_cursor
         for row in rows:
+            if protocol_version < 2 and row["entity_type"] == "memory":
+                scanned_cursor = int(row["revision"])
+                continue
             event = self._event_from_row(row)
             event_size = len(
                 json.dumps(
@@ -657,10 +672,14 @@ class SyncServerStore:
                 break
             events.append(event)
             encoded_size += event_size + (1 if len(events) > 1 else 0)
-        next_cursor = int(events[-1]["revision"]) if events else safe_cursor
+            scanned_cursor = int(row["revision"])
+        next_cursor = scanned_cursor
         return {
             "cursor": next_cursor,
-            "has_more": len(events) < len(rows) or len(rows) == safe_limit,
+            "has_more": (
+                bool(rows) and scanned_cursor < int(rows[-1]["revision"])
+            )
+            or len(rows) == safe_limit,
             "events": events,
         }
 
@@ -703,7 +722,8 @@ class SyncServerStore:
         device = validate_identifier(device_id, "设备 ID")
         safe_scope = validate_identifier(scope, "租约范围")
         safe_key = validate_identifier(lease_key, "租约键")
-        ttl = max(15, min(int(ttl_seconds), 600))
+        maximum_ttl = 172_800 if safe_scope == "proactive" else 600
+        ttl = max(15, min(int(ttl_seconds), maximum_ttl))
         now = time.time()
         expires_at = now + ttl
         with self._connect() as connection:
@@ -896,9 +916,19 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/v1/sync/pull")
-    async def pull(request: Request, cursor: int = 0, limit: int = MAX_SYNC_EVENTS):
+    async def pull(
+        request: Request,
+        cursor: int = 0,
+        limit: int = MAX_SYNC_EVENTS,
+        protocol: int = 1,
+    ):
         account_id = account_from_request(request)
-        return store.pull(account_id, cursor, limit)
+        return store.pull(
+            account_id,
+            cursor,
+            limit,
+            protocol_version=max(1, min(int(protocol), SYNC_PROTOCOL_VERSION)),
+        )
 
     @app.put("/v1/media/{digest}")
     async def put_media(digest: str, request: Request) -> dict[str, bool]:

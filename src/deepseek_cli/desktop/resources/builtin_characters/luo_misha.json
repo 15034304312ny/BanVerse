@@ -21,7 +21,8 @@
     "extensions": {
       "deepseek_chat": {
         "builtin_id": "luo_misha",
-        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoxiaoNeural", "rate": -15, "pitch": 9, "volume": -4, "emotion_preset": "gentle", "auto_emotion": true, "index_tts2_preset": "BanVerse_洛弥莎_讯飞午夜电台"}
+        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoxiaoNeural", "rate": -15, "pitch": 9, "volume": -4, "emotion_preset": "gentle", "auto_emotion": true, "index_tts2_preset": "BanVerse_洛弥莎_讯飞午夜电台"},
+        "visual_identity": {"schema_version": 1, "description": "外表约23岁的成年女性，深海蓝紫色长发，耳后半透明鳍状纹，皮肤有随情绪改变亮度的发光刻纹，神情认真而疏离", "default_outfit": "深海文明的蓝紫色流线长衣，半透明材质细节点到为止，发光刻纹清晰可辨", "negative_prompt": "不要改变蓝紫长发、耳后鳍状纹和皮肤发光刻纹；不要鱼尾、儿童外形或暴露服装；不要增加其他人物、文字、Logo、水印", "use_avatar_reference": true}
       }
     },
     "character_book": {

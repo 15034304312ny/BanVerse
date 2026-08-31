@@ -62,6 +62,18 @@ def test_prepare_speech_text_removes_markdown_code_and_urls():
     assert "标题" in result and "重点 文档" in result and "项目" in result
 
 
+def test_speech_text_skips_image_directives_and_synthesis_tags():
+    text = (
+        "发送图片：窗边的晚霞\n"
+        "【image_prompt: a sunset by the window】\n"
+        "我[p300]今天[=jin1]很想你[pitch=high]。"
+    )
+
+    result = prepare_speech_text(text)
+
+    assert result == "我今天很想你。"
+
+
 def test_speech_segments_skip_actions_and_narration_but_keep_dialogue():
     text = (
         "（她轻声笑了笑，把热茶推过来。）别担心，我在。\n"
@@ -173,6 +185,25 @@ def test_speech_controller_switches_between_edge_and_siliconflow(qapp):
     settings.values["tts_provider"] = "edge"
     assert controller._provider() == "edge"
 
+    controller.shutdown()
+
+
+def test_speech_controller_queues_auto_segments_and_stop_clears_them(qapp):
+    controller = SpeechController(qapp, settings=None, credentials=None)
+    first = controller._speech_request(  # noqa: SLF001
+        "turn:1:segment:0", "第一句。", TtsProfile()
+    )
+    assert first is not None
+    controller._current = first  # noqa: SLF001
+
+    controller.enqueue("turn:1:segment:2", "第二句。", TtsProfile())
+
+    assert [item.message_key for item in controller._queue] == [  # noqa: SLF001
+        "turn:1:segment:2"
+    ]
+    controller.stop()
+    assert controller._current is None  # noqa: SLF001
+    assert not controller._queue  # noqa: SLF001
     controller.shutdown()
 
 

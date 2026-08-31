@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+
 from deepseek_cli.character_cards import empty_card
 from deepseek_cli.desktop.background import (
     AutonomousImageRunner,
@@ -153,6 +155,27 @@ def test_summary_runner_preserves_each_queued_role_state_turn(tmp_path) -> None:
     database.close()
 
 
+def test_summary_runner_respects_per_character_memory_switch(tmp_path) -> None:
+    database, chats, characters, settings = _make_repos(tmp_path)
+    character = characters.create(empty_card("关闭记忆的角色"))
+    settings.set(f"role_memory_character_{character.id}", "false")
+    runner = SummaryRunner(
+        chats=chats,
+        characters=characters,
+        settings=settings,
+        create_text_service=_noop_service,
+        text_api_key=lambda: "",
+        refresh=_noop_refresh,
+    )
+    conversation = chats.create_conversation(character_id=character.id)
+
+    runner.enqueue(conversation.id, "只生成列表摘要")
+
+    assert len(runner._queue) == 1  # noqa: SLF001
+    assert not runner._queue[0].updates_role_state  # noqa: SLF001
+    database.close()
+
+
 def test_summary_runner_skips_missing_conversation(tmp_path) -> None:
     """入队不存在的会话时静默忽略。"""
 
@@ -272,4 +295,95 @@ def test_autonomous_image_runner_shutdown_clears_queue(tmp_path) -> None:
     runner.shutdown()
     runner.enqueue("conv", "turn", "角色", empty_card(), "回答")
     assert len(runner._queue) == 0  # noqa: SLF001
+    database.close()
+
+
+def test_autonomous_image_runner_applies_daily_budget(tmp_path) -> None:
+    database, chats, characters, settings = _make_repos(tmp_path)
+    settings.set("autonomous_image_daily_limit", "0")
+    character = characters.create(empty_card("角色"))
+    conversation = chats.create_conversation(character_id=character.id)
+    turn = chats.create_turn(conversation.id, "给我发张图", "model")
+    chats.complete_turn(turn.id, "好，我这就发一张照片。")
+    runner = AutonomousImageRunner(
+        chats=chats,
+        characters=characters,
+        settings=settings,
+        create_text_service=_noop_service,
+        create_image_service=_noop_image_service,
+        text_api_key=lambda: "key",
+        image_api_key=lambda: "image-key",
+        refresh=_noop_refresh,
+        on_image_saved=lambda _conv: None,
+        on_image_error=lambda _conv, _code: None,
+    )
+
+    queued = runner.enqueue(
+        conversation.id,
+        turn.id,
+        "角色",
+        character.card,
+        "好，我这就发一张照片。",
+        fallback_prompt="现在的生活照",
+        trigger="explicit",
+    )
+
+    assert not queued
+    assert runner.thread is None
+    database.close()
+
+
+def test_autonomous_image_runner_respects_image_boundary_and_marks_event(
+    tmp_path,
+) -> None:
+    database, chats, characters, settings = _make_repos(tmp_path)
+    character = characters.create(empty_card("角色"))
+    conversation = chats.create_conversation(character_id=character.id)
+    turn = chats.create_turn(conversation.id, "今天别发图，只聊天。", "model")
+    chats.complete_turn(
+        turn.id,
+        "好，我陪你聊天。",
+        assistant_segments_json=json.dumps(
+            [
+                {"kind": "dialogue", "text": "好，我陪你聊天。"},
+                {
+                    "kind": "image",
+                    "prompt": "窗边生活照",
+                    "event_id": "event-1",
+                    "status": "pending",
+                },
+            ],
+            ensure_ascii=False,
+        ),
+    )
+    runner = AutonomousImageRunner(
+        chats=chats,
+        characters=characters,
+        settings=settings,
+        create_text_service=_noop_service,
+        create_image_service=_noop_image_service,
+        text_api_key=lambda: "key",
+        image_api_key=lambda: "image-key",
+        refresh=_noop_refresh,
+        on_image_saved=lambda _conv: None,
+        on_image_error=lambda _conv, _code: None,
+    )
+
+    queued = runner.enqueue(
+        conversation.id,
+        turn.id,
+        "角色",
+        character.card,
+        "好，我陪你聊天。",
+        fallback_prompt="窗边生活照",
+        segment_index=1,
+        trigger="role_action",
+    )
+
+    saved = chats.get_turn(conversation.id, turn.id)
+    assert saved is not None
+    image = json.loads(saved.assistant_segments_json)[1]
+    assert not queued
+    assert image["status"] == "failed"
+    assert image["error_code"] == "image_boundary"
     database.close()

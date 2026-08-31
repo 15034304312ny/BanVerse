@@ -4,22 +4,57 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        existed = self.path.is_file() and self.path.stat().st_size > 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA journal_mode = WAL")
         self.connection.execute("PRAGMA busy_timeout = 5000")
-        self._migrate()
+        version = self.connection.execute("PRAGMA user_version").fetchone()[0]
+        backup = None
+        if existed and 0 < version < SCHEMA_VERSION:
+            backup = self.path.with_suffix(
+                self.path.suffix + f".pre-v{version}.bak"
+            )
+            try:
+                with closing(sqlite3.connect(backup)) as target:
+                    self.connection.backup(target)
+            except sqlite3.Error as exc:
+                self.connection.close()
+                raise RuntimeError("数据库升级前备份失败，已取消升级") from exc
+        try:
+            self._migrate()
+        except BaseException:
+            self.connection.close()
+            if backup is not None and backup.is_file():
+                try:
+                    with (
+                        closing(sqlite3.connect(backup)) as source,
+                        closing(sqlite3.connect(self.path)) as target,
+                    ):
+                        target.execute("PRAGMA busy_timeout = 5000")
+                        source.backup(target)
+                        target.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except sqlite3.Error as exc:
+                    raise RuntimeError(
+                        "数据库升级失败，且无法从升级前备份恢复"
+                    ) from exc
+                for suffix in ("-wal", "-shm"):
+                    with suppress(PermissionError):
+                        self.path.with_name(self.path.name + suffix).unlink(
+                            missing_ok=True
+                        )
+            raise
 
     def _migrate(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
@@ -39,6 +74,8 @@ class Database:
             self._migrate_v7()
         if version < 8:
             self._migrate_v8()
+        if version < 9:
+            self._migrate_v9()
 
     def _migrate_v1(self) -> None:
         with self.connection:
@@ -342,6 +379,95 @@ class Database:
                     );
                 END;
                 PRAGMA user_version = 8;
+                """
+            )
+
+    def _migrate_v9(self) -> None:
+        """加入角色来源、可追溯记忆记录及其同步捕获。"""
+
+        with self.connection:
+            character_columns = {
+                row["name"]
+                for row in self.connection.execute(
+                    "PRAGMA table_info(characters)"
+                )
+            }
+            if "source_type" not in character_columns:
+                self.connection.execute(
+                    """ALTER TABLE characters ADD COLUMN source_type TEXT
+                       NOT NULL DEFAULT 'user_created'"""
+                )
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    character_id TEXT,
+                    category TEXT NOT NULL CHECK (category IN (
+                        'user_fact', 'shared_experience',
+                        'preference_boundary', 'open_thread',
+                        'character_commitment'
+                    )),
+                    content TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_turn_id TEXT,
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    salience REAL NOT NULL DEFAULT 0.5,
+                    status TEXT NOT NULL DEFAULT 'candidate' CHECK (status IN (
+                        'candidate', 'active', 'corrected', 'superseded',
+                        'deleted'
+                    )),
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL DEFAULT '',
+                    expires_at TEXT NOT NULL DEFAULT '',
+                    superseded_by_id TEXT NOT NULL DEFAULT '',
+                    confirmed_at TEXT NOT NULL DEFAULT '',
+                    deleted_at TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(character_id) REFERENCES characters(id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY(source_turn_id) REFERENCES turns(id)
+                        ON DELETE SET NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_memories_conversation_status
+                    ON memories(conversation_id, status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_memories_character_status
+                    ON memories(character_id, status, updated_at);
+
+                CREATE TRIGGER IF NOT EXISTS sync_memories_insert
+                AFTER INSERT ON memories
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'memory', NEW.id,
+                        'upsert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS sync_memories_update
+                AFTER UPDATE ON memories
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'memory', NEW.id,
+                        'upsert', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS sync_memories_delete
+                AFTER DELETE ON memories
+                WHEN (SELECT capture_enabled = 1 AND suppress_outbox = 0
+                      FROM sync_runtime WHERE id = 1)
+                BEGIN
+                    INSERT INTO sync_outbox VALUES (
+                        lower(hex(randomblob(16))), 'memory', OLD.id,
+                        'delete', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    );
+                END;
+                PRAGMA user_version = 9;
                 """
             )
 

@@ -25,14 +25,17 @@ from ..widgets.message_bubble import MessageBubble
 
 _ERROR_MESSAGES = {
     "authentication": "API Key 无效，请前往设置检查。",
+    "quota": "当前文本平台额度或计费状态不可用，请检查余额与配额。",
     "timeout": "请求超时，请稍后重试。",
     "network": "网络连接失败，请检查网络后重试。",
     "rate_limit": "请求过于频繁，请稍后重试。",
     "empty_response": "没有收到有效回答。",
+    "empty_message": "消息内容为空，请重新输入。",
+    "invalid_model": "当前对话模型无效，请在聊天页或设置中重新选择。",
     "text_endpoint_invalid": "文本 API 地址无效，请前往设置检查基础地址。",
     "text_model_unavailable": "当前文本模型不可用，请前往设置检查模型名。",
     "text_bad_request": "文本平台拒绝了本次请求，请检查模型与平台配置。",
-    "service_error": "服务暂时不可用，请稍后重试。",
+    "service_error": "文本生成服务暂时不可用，请稍后重试或检查平台状态。",
     "image_authentication": "图片 AI API Key 无效，请前往设置检查。",
     "image_timeout": "图片服务请求超时，请稍后重试。",
     "image_network": "无法连接图片服务，请检查网络。",
@@ -43,7 +46,12 @@ _ERROR_MESSAGES = {
     "image_model_unavailable": (
         "当前图片平台无法使用所选模型，请在设置中检查模型名或账号权限。"
     ),
+    "image_bad_request": "图片平台拒绝了本次请求，请检查模型、尺寸和平台配置。",
     "image_service_error": "图片服务暂时不可用，请稍后重试。",
+    "image_daily_limit": "今天的角色发图额度已经用完，可在图片设置中调整每日上限。",
+    "image_cooldown": "距离上一次角色发图太近，本轮已停止重复生成。",
+    "image_duplicate": "图片内容与近期生成请求重复，本轮已停止生成。",
+    "image_boundary": "当前角色或用户边界不允许自主发送图片。",
 }
 
 
@@ -52,9 +60,11 @@ class ChatPage(QWidget):
     sticker_requested = Signal(str)
     stop_requested = Signal()
     retry_requested = Signal(str)
+    image_retry_requested = Signal(str, str)  # turn_id, image event_id
     model_changed = Signal(str)
     delete_requested = Signal()
     edit_requested = Signal()
+    memory_requested = Signal()
     speech_requested = Signal(str, str)
     speech_stop_requested = Signal(str)
 
@@ -102,6 +112,10 @@ class ChatPage(QWidget):
         self.edit_button.setAccessibleName("编辑当前会话名称、头像和角色")
         self.edit_button.setMinimumHeight(44 if self._mobile else 42)
         self.edit_button.clicked.connect(self.edit_requested)
+        self.memory_button = QPushButton("记忆")
+        self.memory_button.setAccessibleName("管理当前会话记忆")
+        self.memory_button.setMinimumHeight(44 if self._mobile else 42)
+        self.memory_button.clicked.connect(self.memory_requested)
         self.delete_button = QPushButton("删除")
         self.delete_button.setAccessibleName("删除当前会话")
         self.delete_button.setMinimumHeight(44 if self._mobile else 42)
@@ -112,6 +126,7 @@ class ChatPage(QWidget):
             title_row.setSpacing(6)
             title_row.addWidget(self.title)
             title_row.addStretch(1)
+            title_row.addWidget(self.memory_button)
             title_row.addWidget(self.edit_button)
             title_row.addWidget(self.delete_button)
             header_layout.addLayout(title_row)
@@ -120,6 +135,7 @@ class ChatPage(QWidget):
             header_layout.addWidget(self.title)
             header_layout.addStretch(1)
             header_layout.addWidget(self.model_combo)
+            header_layout.addWidget(self.memory_button)
             header_layout.addWidget(self.edit_button)
             header_layout.addWidget(self.delete_button)
         layout.addWidget(header)
@@ -268,6 +284,25 @@ class ChatPage(QWidget):
                                     "",
                                     image_path=segment.image_path,
                                 )
+                            elif segment.status in {"failed", "cancelled"}:
+                                message = _ERROR_MESSAGES.get(
+                                    segment.error_code,
+                                    "图片没有发送成功，请检查图片平台后重试。",
+                                )
+                                self._add_bubble(
+                                    "assistant",
+                                    "图片发送未完成",
+                                    status="failed",
+                                    error_text=message,
+                                    retry_text="重试图片",
+                                    image_retry=(turn.id, segment.event_id),
+                                )
+                            elif segment.status == "pending":
+                                self._add_bubble(
+                                    "assistant",
+                                    "图片正在生成…",
+                                    typing=True,
+                                )
                             continue
                         self._add_bubble(
                             "assistant",
@@ -396,6 +431,22 @@ class ChatPage(QWidget):
             narration=True,
         )
 
+    def add_image_event(self, *, image_path: str = "", pending: bool = False) -> None:
+        if image_path:
+            self.add_assistant_segment("", image_path=image_path)
+        elif pending:
+            self.add_assistant_segment("图片正在生成…")
+
+    def add_image_analysis_error(self, error_code: str) -> None:
+        message = _ERROR_MESSAGES.get(
+            error_code,
+            "暂时无法读取这张图片，角色仍会根据随附文字继续回复。",
+        )
+        self.add_assistant_segment(
+            f"（图片理解失败：{message}）",
+            narration=True,
+        )
+
     def finish_stream(self) -> None:
         self._stream_bubble = None
         self.composer.set_generating(False)
@@ -412,6 +463,7 @@ class ChatPage(QWidget):
         self.composer.set_available(available)
         self._update_model_combo_enabled()
         self.edit_button.setEnabled(available)
+        self.memory_button.setEnabled(available)
         self.delete_button.setEnabled(available)
 
     def _update_model_combo_enabled(self) -> None:
@@ -428,8 +480,17 @@ class ChatPage(QWidget):
         return super().eventFilter(watched, event)
 
     def _add_bubble(self, role: str, text: str, **kwargs) -> MessageBubble:
+        image_retry = kwargs.pop("image_retry", None)
         bubble = MessageBubble(role, text, **kwargs)
-        bubble.retry_requested.connect(self.retry_requested)
+        if image_retry:
+            turn_id, event_id = image_retry
+            bubble.retry_requested.connect(
+                lambda _text, turn=turn_id, event=event_id: (
+                    self.image_retry_requested.emit(turn, event)
+                )
+            )
+        else:
+            bubble.retry_requested.connect(self.retry_requested)
         bubble.speech_requested.connect(self.speech_requested)
         bubble.speech_stop_requested.connect(self.speech_stop_requested)
         message_key = kwargs.get("message_key", "")

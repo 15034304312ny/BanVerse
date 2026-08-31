@@ -21,7 +21,8 @@
     "extensions": {
       "deepseek_chat": {
         "builtin_id": "bai_tu",
-        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoxiaoNeural", "rate": -12, "pitch": 2, "volume": -3, "emotion_preset": "gentle", "auto_emotion": true, "index_tts2_preset": "BanVerse_白荼_讯飞聆小玥"}
+        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoxiaoNeural", "rate": -12, "pitch": 2, "volume": -3, "emotion_preset": "gentle", "auto_emotion": true, "index_tts2_preset": "BanVerse_白荼_讯飞聆小玥"},
+        "visual_identity": {"schema_version": 1, "description": "外表约25岁的成年女性，银白长发垂至腰际，神情安静温柔，青黛衣袖带古雅茶馆主人的克制气质", "default_outfit": "青黛色宽袖古雅衣裙，低调茶色腰带，不佩夸张首饰", "negative_prompt": "不要改变银白及腰长发和青黛衣袖；不要幼态化、现代服装、仙女光环或夸张法术特效；不要增加其他人物、文字、Logo、水印", "use_avatar_reference": true}
       }
     },
     "character_book": {

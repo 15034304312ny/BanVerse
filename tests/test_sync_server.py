@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from uuid import uuid4
 
 import pytest
 
 from deepseek_cli._version import __version__
-from deepseek_cli.sync_protocol import bearer_credential
+from deepseek_cli.sync_protocol import SYNC_PROTOCOL_VERSION, bearer_credential
 from deepseek_cli.sync_server import (
     SyncAccountExistsError,
     SyncAuthenticationError,
@@ -84,6 +85,78 @@ def test_account_auth_push_pull_idempotency_conflict_and_tombstone(tmp_path):
     assert changes[-1]["revision"] > first_revision
 
 
+def test_protocol_one_clients_skip_memory_events_and_advance_cursor(tmp_path):
+    store = SyncServerStore(tmp_path / "sync.db", tmp_path / "media")
+    account = store.create_account("兼容测试")
+    memory_id = str(uuid4())
+    memory = {
+        "event_id": uuid4().hex,
+        "entity_type": "memory",
+        "entity_id": memory_id,
+        "operation": "upsert",
+        "base_revision": 0,
+        "updated_at": "2026-08-29T12:00:00+00:00",
+        "payload": {"id": memory_id, "status": "active"},
+        "media": {},
+    }
+    pushed = store.push(
+        account["account_id"], "new-device", "新版设备", [memory]
+    )
+    revision = pushed["results"][0]["revision"]
+
+    old = store.pull(
+        account["account_id"], 0, protocol_version=1
+    )
+    new = store.pull(
+        account["account_id"], 0, protocol_version=2
+    )
+
+    assert old["events"] == []
+    assert old["cursor"] == revision
+    assert new["events"][0]["entity_type"] == "memory"
+
+
+def test_memory_deletion_state_wins_over_stale_edit(tmp_path):
+    store = SyncServerStore(tmp_path / "sync.db", tmp_path / "media")
+    account = store.create_account("删除优先")
+    memory_id = str(uuid4())
+    active = {
+        "event_id": uuid4().hex,
+        "entity_type": "memory",
+        "entity_id": memory_id,
+        "operation": "upsert",
+        "base_revision": 0,
+        "updated_at": "2026-08-29T12:00:00+00:00",
+        "payload": {"id": memory_id, "content": "旧事实", "status": "active"},
+        "media": {},
+    }
+    first = store.push(
+        account["account_id"], "device-one", "电脑", [active]
+    )
+    deletion = {
+        **active,
+        "event_id": uuid4().hex,
+        "base_revision": 0,
+        "payload": {"id": memory_id, "content": "", "status": "deleted"},
+    }
+    deleted = store.push(
+        account["account_id"], "device-two", "手机", [deletion]
+    )
+
+    assert deleted["results"][0]["status"] == "accepted"
+    assert deleted["results"][0]["revision"] > first["results"][0]["revision"]
+    stale = {
+        **active,
+        "event_id": uuid4().hex,
+        "payload": {"id": memory_id, "content": "过期编辑", "status": "active"},
+    }
+    conflict = store.push(
+        account["account_id"], "device-one", "电脑", [stale]
+    )
+    assert conflict["results"][0]["status"] == "conflict"
+    assert conflict["results"][0]["current"]["payload"]["status"] == "deleted"
+
+
 def test_media_is_hash_verified_and_isolated_by_account(tmp_path):
     store = SyncServerStore(tmp_path / "sync.db", tmp_path / "media")
     first = store.create_account()
@@ -116,6 +189,24 @@ def test_proactive_message_lease_allows_only_one_device(tmp_path):
     assert first["acquired"] is True
     assert second["acquired"] is False
     assert renewed["acquired"] is True
+
+    daily = store.claim_lease(
+        account_id,
+        "device-one",
+        "proactive",
+        "proactive-slot-20260830-00000001",
+        86_400,
+    )
+    competing = store.claim_lease(
+        account_id,
+        "device-two",
+        "proactive",
+        "proactive-slot-20260830-00000001",
+        86_400,
+    )
+    assert daily["acquired"] is True
+    assert daily["expires_at"] > time.time() + 80_000
+    assert competing["acquired"] is False
 
 
 def test_password_account_login_logout_and_legacy_upgrade(tmp_path):
@@ -197,7 +288,7 @@ def test_fastapi_health_account_and_authenticated_pull(tmp_path, monkeypatch):
         )
 
     assert health.status_code == 200
-    assert health.json()["protocol"] == 1
+    assert health.json()["protocol"] == SYNC_PROTOCOL_VERSION
     assert health.json()["server_version"] == __version__
     assert health.json()["password_auth"] is True
     assert health.json()["registration_requires_invite"] is False

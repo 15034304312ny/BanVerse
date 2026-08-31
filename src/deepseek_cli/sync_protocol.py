@@ -8,13 +8,16 @@ import unicodedata
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
-SYNC_PROTOCOL_VERSION = 1
-SYNC_ENTITY_TYPES = frozenset({"character", "conversation", "turn"})
+SYNC_PROTOCOL_VERSION = 2
+SYNC_ENTITY_TYPES = frozenset(
+    {"character", "conversation", "turn", "memory"}
+)
 SYNC_OPERATIONS = frozenset({"upsert", "delete"})
 SYNC_MEDIA_FIELDS = {
     "character": frozenset({"avatar_path"}),
     "conversation": frozenset({"avatar_override_path"}),
     "turn": frozenset({"user_image_path", "assistant_image_path"}),
+    "memory": frozenset(),
 }
 MAX_SYNC_EVENTS = 200
 MAX_SYNC_PAYLOAD_BYTES = 2 * 1024 * 1024

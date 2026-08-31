@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import QCoreApplication, QPointF, Qt, QUrl
+from PySide6.QtCore import QCoreApplication, QDateTime, QPointF, Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QImage, QScrollEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,6 +21,8 @@ from deepseek_cli.character_cards import empty_card
 from deepseek_cli.desktop.data.database import Database
 from deepseek_cli.desktop.data.repositories import (
     Character,
+    CharacterRepository,
+    ChatRepository,
     Conversation,
     SettingsRepository,
 )
@@ -29,15 +31,25 @@ from deepseek_cli.desktop.stickers import STICKERS
 from deepseek_cli.desktop.ui.character_editor_dialog import (
     CharacterEditorDialog,
 )
+from deepseek_cli.desktop.ui.conversation_edit_dialog import (
+    ConversationEditDialog,
+)
 from deepseek_cli.desktop.ui.file_dialogs import open_mobile_file_dialog
+from deepseek_cli.desktop.ui.memory_manager_dialog import MemoryManagerDialog
 from deepseek_cli.desktop.ui.mobile import enable_touch_scrolling
 from deepseek_cli.desktop.ui.pages.characters_page import CharacterRow
 from deepseek_cli.desktop.ui.pages.chat_page import ChatPage
 from deepseek_cli.desktop.ui.pages.conversations_page import ConversationRow
 from deepseek_cli.desktop.ui.pages.settings_page import SettingsPage
+from deepseek_cli.desktop.ui.relationship_policy_dialog import (
+    RelationshipPolicyDialog,
+)
 from deepseek_cli.desktop.ui.widgets.chat_composer import ChatComposer
 from deepseek_cli.desktop.ui.widgets.message_bubble import MessageBubble
 from deepseek_cli.desktop.ui.widgets.sticker_picker import StickerPickerDialog
+from deepseek_cli.diagnostics import DiagnosticRecorder
+from deepseek_cli.multimodal import read_visual_identity
+from deepseek_cli.relationship_policy import relationship_policy_for
 
 
 def conversation(**overrides):
@@ -165,6 +177,54 @@ def test_chat_page_load_defers_opening(qtbot):
     assert page._message_bubbles() == []
 
 
+def test_chat_page_restores_failed_image_event_with_dedicated_retry(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "failed-image-ui.db")
+    chats = ChatRepository(database)
+    current = chats.create_conversation(title="图片重试")
+    turn = chats.create_turn(current.id, "给我看看", "model")
+    chats.complete_turn(
+        turn.id,
+        "我这就发给你。",
+        assistant_segments_json=json.dumps(
+            [
+                {"kind": "dialogue", "text": "我这就发给你。"},
+                {
+                    "kind": "image",
+                    "prompt": "窗边晚霞",
+                    "event_id": "image-event-1",
+                    "status": "failed",
+                    "error_code": "image_timeout",
+                },
+            ],
+            ensure_ascii=False,
+        ),
+    )
+    page = ChatPage()
+    qtbot.addWidget(page)
+    retries = []
+    page.image_retry_requested.connect(
+        lambda turn_id, event_id: retries.append((turn_id, event_id))
+    )
+
+    page.load(current, chats.list_turns(current.id))
+
+    failed = next(
+        bubble
+        for bubble in page._message_bubbles()
+        if bubble.text_label.text() == "图片发送未完成"
+    )
+    retry = next(
+        button
+        for button in failed.findChildren(QPushButton)
+        if button.text() == "重试"
+    )
+    retry.click()
+    assert retries == [(turn.id, "image-event-1")]
+    database.close()
+
+
 def test_chat_page_pins_to_bottom_and_hides_new_button(qtbot):
     page = ChatPage()
     qtbot.addWidget(page)
@@ -255,7 +315,7 @@ def test_character_row_shows_avatar_content_and_trusted_builtin_badge(qtbot):
         "builtin:xie_zhaoning", "谢昭宁", "", card, "now", "now"
     )
     imported = Character(
-        "random-id", "导入角色", "", card, "now", "now"
+        "random-id", "导入角色", "", card, "now", "now", "imported"
     )
 
     row = CharacterRow(character)
@@ -272,8 +332,9 @@ def test_character_row_shows_avatar_content_and_trusted_builtin_badge(qtbot):
     assert "钦天监" in row.description.toolTip()
     assert row.tags.text() == "女性 · 推理 · 宫廷"
     assert row.badge is not None and row.badge.text() == "内置"
-    assert ordinary.badge is None
+    assert ordinary.badge is not None and ordinary.badge.text() == "导入"
     assert "内置角色" in row.accessibleName()
+    assert "导入角色" in ordinary.accessibleName()
 
 
 def test_assistant_markdown_and_user_plain_text(qtbot):
@@ -396,6 +457,9 @@ def test_settings_separates_text_image_and_tts_providers(tmp_path, qtbot):
     assert page.text_provider.findData("deepseek") >= 0
     assert page.text_provider.findData("grsai") >= 0
     assert page.text_provider.currentData() == "deepseek"
+    assert page.aux_text_provider.currentData() == "inherit"
+    assert page.aux_deepseek_model.currentData() == "deepseek-v4-flash"
+    assert "辅助任务跟随主角色模型" in page.aux_text_status.text()
     assert page.image_provider.findData("siliconflow") >= 0
     assert page.image_provider.findData("grsai") >= 0
     assert page.image_provider.currentData() == "siliconflow"
@@ -432,6 +496,12 @@ def test_settings_separates_text_image_and_tts_providers(tmp_path, qtbot):
     assert page.tts_provider.findData("indextts2") >= 0
     assert page.tts_provider.currentData() == "edge"
     assert page.autonomous_images_enabled.isChecked()
+    assert page.autonomous_image_daily_limit.value() == 4
+    assert page.autonomous_image_cooldown_turns.value() == 4
+    page.autonomous_images_enabled.setChecked(False)
+    assert not page.autonomous_image_daily_limit.isEnabled()
+    assert not page.autonomous_image_cooldown_turns.isEnabled()
+    page.autonomous_images_enabled.setChecked(True)
     assert page.notification_sound_enabled.isChecked()
     assert page.xfyun_tts_voice.findData("auto") >= 0
     assert page.xfyun_tts_voice.findData("x5_lingxiaoxuan_flow") >= 0
@@ -446,7 +516,41 @@ def test_settings_separates_text_image_and_tts_providers(tmp_path, qtbot):
     assert "动作与旁白" in page.tts_auto_play.text()
     assert page.user_name.text() == "用户"
     assert page.roleplay_temperature.value() == 1.3
+    assert page.roleplay_sampling_mode.currentData() == "temperature"
+    assert page.roleplay_temperature.isEnabled()
+    assert not page.roleplay_top_p.isEnabled()
+    page.roleplay_sampling_mode.setCurrentIndex(
+        page.roleplay_sampling_mode.findData("provider_default")
+    )
+    assert not page.roleplay_temperature.isEnabled()
+    assert page._settings.get("roleplay_sampling_mode") == "provider_default"
     assert page.role_memory_enabled.isChecked()
+    assert page.memory_retention_days.value() == 365
+    assert page.memory_max_items.value() == 200
+    assert not page.roleplay_director_enabled.isChecked()
+    assert not page.roleplay_director_threshold.isEnabled()
+    assert page.roleplay_director_threshold.value() == 6
+    assert page.roleplay_director_max_extra_calls.value() == 1
+    assert page.roleplay_director_timeout.value() == 8
+    page.roleplay_director_enabled.setChecked(True)
+    assert page.roleplay_director_threshold.isEnabled()
+    assert page._settings.get("roleplay_director_enabled") == "true"
+    assert page.relationship_pace.currentData() == "natural"
+    assert page.relationship_preferred_address.text() == ""
+    assert page.proactive_frequency.currentData() == "normal"
+    assert page.proactive_daily_limit.value() == 2
+    assert page.proactive_quiet_start.time().toString("HH:mm") == "22:30"
+    assert page.proactive_quiet_end.time().toString("HH:mm") == "08:00"
+    assert not page.proactive_frequency.isEnabled()
+    page.proactive_enabled.setChecked(True)
+    assert page.proactive_frequency.isEnabled()
+    assert page.proactive_daily_limit.isEnabled()
+    page.relationship_preferred_address.setText("阿澄")
+    page.relationship_preferred_address.editingFinished.emit()
+    page.relationship_blocked_topics.setText("收入、住址")
+    page.relationship_blocked_topics.editingFinished.emit()
+    assert page._settings.get("relationship_preferred_address") == "阿澄"
+    assert page._settings.get("relationship_blocked_topics") == "收入、住址"
     assert not page.character_discovery_enabled.isChecked()
     assert not page.character_discovery_min_minutes.isEnabled()
     assert page.character_discovery_female_percent.value() == 50
@@ -464,6 +568,101 @@ def test_settings_separates_text_image_and_tts_providers(tmp_path, qtbot):
     assert page._settings.get("character_discovery_enabled") == "true"
     assert "新联系人会话" in labels
     assert "伴界 BanVerse" in labels
+    database.close()
+
+
+def test_character_relationship_policy_dialog_saves_override_pause_and_reason(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "chat.db")
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    settings.set("relationship_pace", "slow")
+    character = characters.create(empty_card("边界测试角色"))
+    settings.set(
+        f"proactive_last_status_{character.id}",
+        "因为存在未完话题，并且已通过静默和冷却检查。",
+    )
+    dialog = RelationshipPolicyDialog(character, settings)
+    qtbot.addWidget(dialog)
+
+    assert dialog.inherit.isChecked()
+    assert not dialog.pace.isEnabled()
+    assert dialog.muted.isEnabled()
+    assert "未完话题" in dialog.last_reason.text()
+    dialog.inherit.setChecked(False)
+    dialog.pace.setCurrentIndex(dialog.pace.findData("fast"))
+    dialog.preferred_address.setText("老师")
+    dialog.blocked_topics.setText("收入、住址")
+    dialog.frequency.setCurrentIndex(dialog.frequency.findData("low"))
+    dialog.daily_limit.setValue(1)
+    dialog.muted.setChecked(True)
+    dialog._pause_day()
+    assert dialog._paused_until
+    dialog.pause_until.setDateTime(QDateTime(2030, 1, 2, 9, 30, 0))
+    dialog._apply_pause()
+    dialog._save()
+
+    saved = relationship_policy_for(settings, character.id)
+    assert saved.inherited is False
+    assert saved.pace == "fast"
+    assert saved.preferred_address == "老师"
+    assert saved.blocked_topics == ("收入", "住址")
+    assert saved.proactive_frequency == "low"
+    assert saved.daily_limit == 1
+    assert saved.muted is True
+    assert saved.paused_until.startswith("2030-01-02T09:30")
+    database.close()
+
+
+def test_conversation_editor_exposes_per_conversation_director_switch(qtbot):
+    dialog = ConversationEditDialog(
+        conversation(),
+        [],
+        director_enabled=False,
+        director_available=True,
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.director.isEnabled()
+    assert not dialog.director.isChecked()
+
+
+def test_memory_manager_confirms_candidate_without_deleting_messages(
+    tmp_path, qtbot
+):
+    database = Database(tmp_path / "memory-manager.db")
+    chats = ChatRepository(database)
+    characters = CharacterRepository(database)
+    settings = SettingsRepository(database)
+    character = characters.create(empty_card("记忆角色"))
+    conversation = chats.create_conversation(character_id=character.id)
+    turn = chats.create_turn(conversation.id, "保留消息", "deepseek-v4-flash")
+    chats.complete_turn(turn.id, "好的")
+    memory = chats.create_memory(
+        conversation.id,
+        "user_fact",
+        "模型推测的候选",
+        source_type="assistant_inferred",
+        source_turn_id=turn.id,
+        status="candidate",
+    )
+    dialog = MemoryManagerDialog(
+        chats, settings, conversation.id
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.list.count() == 1
+    assert dialog.confirm_button.isEnabled()
+    dialog.confirm_button.click()
+    confirmed = chats.get_memory(memory.id)
+    assert confirmed.status == "active"
+    assert confirmed.confirmed_at
+    assert len(chats.list_turns(conversation.id)) == 1
+    dialog.character_enabled.setChecked(False)
+    assert settings.get_bool(
+        f"role_memory_character_{character.id}", True
+    ) is False
     database.close()
 
 
@@ -721,6 +920,9 @@ def test_settings_model_dropdowns_filter_cached_catalog_by_capability(
             combo.itemData(index) for index in range(combo.count())
         }
     assert {"chat-only", "vision-chat"} <= combo_values(page.grsai_text_model)
+    assert {"chat-only", "vision-chat"} <= combo_values(
+        page.aux_grsai_text_model
+    )
     assert "image-only" not in combo_values(page.grsai_text_model)
     assert "vision-chat" in combo_values(page.grsai_vision_model)
     assert "chat-only" not in combo_values(page.grsai_vision_model)
@@ -843,6 +1045,27 @@ def test_android_dialogs_and_stickers_use_mobile_layout(monkeypatch, qtbot):
     )
     assert picker._columns == 4
     assert picker.width() == 344
+
+
+def test_character_editor_saves_stable_visual_identity(qtbot):
+    card = empty_card("视觉测试角色")
+    character = Character(
+        "visual-test", "视觉测试角色", "", card, "now", "now"
+    )
+    editor = CharacterEditorDialog(character)
+    qtbot.addWidget(editor)
+    editor.visual_description.setPlainText("成年女性，棕色短发，灰蓝眼睛")
+    editor.visual_default_outfit.setPlainText("米白色长外套")
+    editor.visual_negative_prompt.setPlainText("不要改变发色和眼睛颜色")
+    editor.visual_use_avatar_reference.setChecked(False)
+
+    editor._save()
+
+    identity = read_visual_identity(editor.card)
+    assert identity.description == "成年女性，棕色短发，灰蓝眼睛"
+    assert identity.default_outfit == "米白色长外套"
+    assert identity.negative_prompt == "不要改变发色和眼睛颜色"
+    assert not identity.use_avatar_reference
 
 
 def test_android_settings_and_character_rows_are_touch_ready(
@@ -1202,3 +1425,32 @@ def test_android_document_bridge_delivers_private_copy(
     assert selected == [str(image_path)]
     assert results == [QDialog.DialogCode.Accepted.value]
     assert opened[0].startswith("banverse-picker://open?")
+
+
+def test_settings_shows_and_exports_privacy_safe_diagnostics(
+    tmp_path, qtbot, monkeypatch
+):
+    class Credentials:
+        @staticmethod
+        def get_api_key():
+            return ""
+
+    database = Database(tmp_path / "diagnostics-settings.db")
+    recorder = DiagnosticRecorder(tmp_path / "diagnostics")
+    recorder.record("text_chat", "model_completed", duration_ms=25)
+    page = SettingsPage(
+        SettingsRepository(database), Credentials(), diagnostics=recorder
+    )
+    qtbot.addWidget(page)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        "deepseek_cli.desktop.ui.pages.settings_page.QMessageBox.information",
+        lambda _parent, _title, message: messages.append(message),
+    )
+
+    output = tmp_path / "exported-diagnostics.zip"
+    page._export_diagnostics_to_path(str(output))
+
+    assert "本机事件：1" in page.diagnostics_status.text()
+    assert output.is_file()
+    assert messages and "脱敏诊断包已保存" in messages[0]

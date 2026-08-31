@@ -25,6 +25,11 @@ from PySide6.QtWidgets import (
 )
 
 from ...character_cards import CharacterCardError, empty_card, normalize_card
+from ...multimodal import (
+    VisualIdentity,
+    read_visual_identity,
+    write_visual_identity,
+)
 from ...tts import (
     EMOTION_PRESETS,
     TtsProfile,
@@ -112,6 +117,42 @@ class CharacterEditorDialog(QDialog):
         )
         advanced_form.addRow("Character Book JSON", self.character_book)
         self._add_tab(advanced, "高级")
+
+        visual_page = QWidget()
+        visual_form = QFormLayout(visual_page)
+        configure_mobile_form(visual_form)
+        visual_identity = read_visual_identity(self.card)
+        self.visual_description = self._text(visual_identity.description)
+        self.visual_description.setPlaceholderText(
+            "稳定的成年外貌、发型发色、五官、体型和辨识特征"
+        )
+        visual_form.addRow("稳定视觉身份", self.visual_description)
+        self.visual_default_outfit = self._text(
+            visual_identity.default_outfit
+        )
+        self.visual_default_outfit.setPlaceholderText(
+            "没有已知换装信息时使用的常服或职业服装"
+        )
+        visual_form.addRow("默认服装", self.visual_default_outfit)
+        self.visual_negative_prompt = self._text(
+            visual_identity.negative_prompt
+        )
+        visual_form.addRow("负面约束", self.visual_negative_prompt)
+        self.visual_use_avatar_reference = QCheckBox(
+            "平台明确支持时允许把角色头像作为一致性参考"
+        )
+        self.visual_use_avatar_reference.setChecked(
+            visual_identity.use_avatar_reference
+        )
+        visual_form.addRow("", self.visual_use_avatar_reference)
+        visual_note = QLabel(
+            "当前硅基流动与 GRS AI 适配器只使用文字身份约束，不会擅自上传头像。"
+            "只有模型目录和适配器同时明确支持参考图时才会启用。"
+        )
+        visual_note.setWordWrap(True)
+        visual_note.setProperty("muted", True)
+        visual_form.addRow("", visual_note)
+        self._add_tab(visual_page, "视觉")
 
         voice_page = QWidget()
         voice_form = QFormLayout(voice_page)
@@ -296,7 +337,21 @@ class CharacterEditorDialog(QDialog):
                 else self.index_tts2_preset.currentText().strip()
             )
             self.card = write_tts_profile(
-                self.card,
+                write_visual_identity(
+                    self.card,
+                    VisualIdentity(
+                        description=self.visual_description.toPlainText(),
+                        default_outfit=(
+                            self.visual_default_outfit.toPlainText()
+                        ),
+                        negative_prompt=(
+                            self.visual_negative_prompt.toPlainText()
+                        ),
+                        use_avatar_reference=(
+                            self.visual_use_avatar_reference.isChecked()
+                        ),
+                    ),
+                ),
                 TtsProfile(
                     voice=voice,
                     rate=self.tts_rate.value(),

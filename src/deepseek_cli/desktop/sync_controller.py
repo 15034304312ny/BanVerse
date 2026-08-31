@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, QSysInfo, QThread, QTimer, Signal, Slot
 
+from ..diagnostics import DiagnosticRecorder
 from ..sync_protocol import (
     DEFAULT_SYNC_URL,
     bearer_credential,
@@ -162,10 +164,18 @@ class SyncLeaseWorker(QObject):
     failed = Signal(str, str)
     finished = Signal(str)
 
-    def __init__(self, config: SyncConfig, conversation_id: str) -> None:
+    def __init__(
+        self,
+        config: SyncConfig,
+        conversation_id: str,
+        lease_key: str,
+        ttl_seconds: int,
+    ) -> None:
         super().__init__()
         self._config = config
         self._conversation_id = conversation_id
+        self._lease_key = lease_key
+        self._ttl_seconds = ttl_seconds
 
     @Slot()
     def run(self) -> None:
@@ -178,8 +188,8 @@ class SyncLeaseWorker(QObject):
             ).claim_lease(
                 self._config.device_id,
                 "proactive",
-                self._conversation_id,
-                180,
+                self._lease_key,
+                self._ttl_seconds,
             )
             self.completed.emit(self._conversation_id, acquired)
         except Exception as exc:
@@ -201,6 +211,7 @@ class SyncController(QObject):
         credentials: CredentialStore,
         database_path: str | Path,
         media_root: str | Path,
+        diagnostics: DiagnosticRecorder | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -208,6 +219,7 @@ class SyncController(QObject):
         self._credentials = credentials
         self._database_path = Path(database_path)
         self._media_root = Path(media_root)
+        self._diagnostics = diagnostics
         self._timer = QTimer(self)
         self._timer.setInterval(15_000)
         self._timer.timeout.connect(self.sync_now)
@@ -218,6 +230,8 @@ class SyncController(QObject):
         self._sync_thread: QThread | None = None
         self._sync_worker: SyncCycleWorker | None = None
         self._sync_pending = False
+        self._sync_task_id = ""
+        self._sync_started_at = 0.0
         self._link_reset_pending = False
         self._auth_thread: QThread | None = None
         self._auth_worker: SyncAuthWorker | None = None
@@ -266,6 +280,13 @@ class SyncController(QObject):
             self.reload()
             return
         self.status_changed.emit("正在同步消息、角色和图片……")
+        self._sync_task_id = (
+            self._diagnostics.new_task_id("sync")
+            if self._diagnostics is not None
+            else ""
+        )
+        self._sync_started_at = monotonic()
+        self._record_sync_diagnostic("cycle_started", outcome="started")
         worker = SyncCycleWorker(config, self._database_path, self._media_root)
         thread = QThread(self)
         self._sync_worker, self._sync_thread = worker, thread
@@ -451,7 +472,13 @@ class SyncController(QObject):
     def _device_name(self) -> str:
         return self._settings.get("sync_device_name", "BanVerse 设备")
 
-    def claim_proactive(self, conversation_id: str) -> None:
+    def claim_proactive(
+        self,
+        conversation_id: str,
+        *,
+        event_id: str = "",
+        ttl_seconds: int = 600,
+    ) -> None:
         config = self._config()
         if not self.enabled or config is None:
             self.proactive_claimed.emit(conversation_id, True)
@@ -459,7 +486,12 @@ class SyncController(QObject):
         if conversation_id in self._lease_tasks:
             self.proactive_claimed.emit(conversation_id, False)
             return
-        worker = SyncLeaseWorker(config, conversation_id)
+        worker = SyncLeaseWorker(
+            config,
+            conversation_id,
+            event_id or conversation_id,
+            max(600, min(int(ttl_seconds), 172_800)),
+        )
         thread = QThread(self)
         self._lease_tasks[conversation_id] = (thread, worker)
         worker.moveToThread(thread)
@@ -506,22 +538,61 @@ class SyncController(QObject):
         if result.conflicts:
             text += f" 有 {result.conflicts} 项并发冲突已保留。"
         self.status_changed.emit(text)
+        self._record_sync_diagnostic(
+            "cycle_completed",
+            duration_ms=(monotonic() - self._sync_started_at) * 1000,
+            details={
+                "pushed": result.pushed,
+                "pulled": result.pulled,
+                "conflicts": result.conflicts,
+            },
+        )
         if result.pulled:
             self.data_changed.emit()
 
     @Slot(str)
     def _sync_failed(self, error: str) -> None:
         self.status_changed.emit(f"同步失败：{error}")
+        self._record_sync_diagnostic(
+            "cycle_completed",
+            outcome="error",
+            error_code="sync_service_error",
+            duration_ms=(monotonic() - self._sync_started_at) * 1000,
+        )
 
     @Slot()
     def _sync_finished(self) -> None:
         self._sync_worker = None
         self._sync_thread = None
+        self._sync_task_id = ""
+        self._sync_started_at = 0.0
         if self._link_reset_pending:
             self._reset_link_state_now()
         if self._sync_pending and not self._stopping:
             self._sync_pending = False
             QTimer.singleShot(0, self.sync_now)
+
+    def _record_sync_diagnostic(
+        self,
+        stage: str,
+        *,
+        outcome: str = "ok",
+        error_code: str = "",
+        duration_ms: float | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        if self._diagnostics is None:
+            return
+        self._diagnostics.record(
+            "sync",
+            stage,
+            outcome=outcome,
+            error_code=error_code,
+            duration_ms=duration_ms,
+            request_kind="background",
+            task_id=self._sync_task_id,
+            details=details,
+        )
 
     @Slot(object)
     def _auth_completed(self, result: dict) -> None:

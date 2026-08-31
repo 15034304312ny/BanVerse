@@ -21,7 +21,8 @@
     "extensions": {
       "deepseek_chat": {
         "builtin_id": "ruan_xingyao",
-        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoyiNeural", "rate": 10, "pitch": 8, "volume": 3, "emotion_preset": "cheerful", "auto_emotion": true, "index_tts2_preset": "BanVerse_阮星遥_讯飞聆小璇"}
+        "tts": {"schema_version": 2, "voice": "zh-CN-XiaoyiNeural", "rate": 10, "pitch": 8, "volume": 3, "emotion_preset": "cheerful", "auto_emotion": true, "index_tts2_preset": "BanVerse_阮星遥_讯飞聆小璇"},
+        "visual_identity": {"schema_version": 1, "description": "22岁成年女性，铜橙色利落短发，护目镜架在额头，左臂为自制多功能机械义肢，敏捷有生命力的机械师气质", "default_outfit": "耐磨机械师短外套、工具腰带、工装裤与旧护目镜，左机械义肢保持可见", "negative_prompt": "不要改变铜橙短发、额头护目镜和左机械义肢；不要把义肢换到右侧或变成全身机器人；不要增加其他人物、文字、Logo、水印", "use_avatar_reference": true}
       }
     },
     "character_book": {

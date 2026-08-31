@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 
 from PySide6.QtCore import (
     QLocale,
@@ -18,6 +20,7 @@ from PySide6.QtCore import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtTextToSpeech import QTextToSpeech
 
+from ..diagnostics import DiagnosticRecorder
 from ..tts import (
     SpeechSegment,
     TtsProfile,
@@ -75,6 +78,8 @@ class SpeechRequest:
     profile: TtsProfile
     segments: tuple[SpeechSegment, ...]
     provider: str
+    diagnostic_task_id: str = ""
+    started_at: float = 0.0
 
 
 class SpeechController(QObject):
@@ -87,6 +92,7 @@ class SpeechController(QObject):
         *,
         settings=None,
         credentials=None,
+        diagnostics: DiagnosticRecorder | None = None,
         edge_worker_factory=TtsSynthesisWorker,
         siliconflow_worker_factory=SiliconFlowTtsSynthesisWorker,
         xfyun_worker_factory=XfyunSuperTtsSynthesisWorker,
@@ -95,6 +101,7 @@ class SpeechController(QObject):
         super().__init__(parent)
         self._settings = settings
         self._credentials = credentials
+        self._diagnostics = diagnostics
         self._edge_worker_factory = edge_worker_factory
         self._siliconflow_worker_factory = siliconflow_worker_factory
         self._xfyun_worker_factory = xfyun_worker_factory
@@ -119,9 +126,11 @@ class SpeechController(QObject):
         self._thread: QThread | None = None
         self._worker: QObject | None = None
         self._pending: SpeechRequest | None = None
+        self._queue: deque[SpeechRequest] = deque()
         self._current: SpeechRequest | None = None
         self._request_id = 0
         self._segment_index = 0
+        self._segment_started_at = 0.0
         self._cache: dict[str, Path] = {}
         self._cache_dir = Path(
             QStandardPaths.writableLocation(
@@ -132,27 +141,66 @@ class SpeechController(QObject):
         self._shutdown = False
 
     def speak(self, message_key: str, text: str, profile: TtsProfile) -> None:
+        """立即播放一条用户主动点选的语音，并中断旧播放。"""
+
+        request = self._speech_request(message_key, text, profile)
+        if request is None:
+            return
+        self._interrupt_with(request)
+
+    def enqueue(self, message_key: str, text: str, profile: TtsProfile) -> None:
+        """按消息事件顺序排队自动语音，不取消同轮前一段台词。"""
+
+        request = self._speech_request(message_key, text, profile)
+        if request is None:
+            return
+        self._shutdown = False
+        if self._current is not None or self._thread is not None:
+            if not any(item.message_key == message_key for item in self._queue):
+                self._queue.append(request)
+            return
+        self._start_request(request)
+
+    def _speech_request(
+        self, message_key: str, text: str, profile: TtsProfile
+    ) -> SpeechRequest | None:
         segments = extract_speech_segments(text)
         speech_text = "\n".join(segment.text for segment in segments).strip()
         if not message_key or not speech_text or not segments:
-            return
+            return None
         provider = self._provider()
         segments = self._segments_for_provider(provider, segments)
         speech_text = "".join(segment.text for segment in segments).strip()
-        request = SpeechRequest(
+        return SpeechRequest(
             message_key,
             speech_text,
             profile,
             segments,
             provider,
+            (
+                self._diagnostics.new_task_id("tts")
+                if self._diagnostics is not None
+                else ""
+            ),
+            monotonic(),
         )
+
+    def _interrupt_with(self, request: SpeechRequest) -> None:
         self._shutdown = False
+        self._queue.clear()
         if self._thread is not None:
+            if self._pending is not None:
+                self._record_speech(
+                    self._pending, "request_completed", outcome="cancelled"
+                )
             self._pending = request
             self._request_id += 1
             if self._worker is not None:
                 self._worker.cancel()
             if self._current is not None:
+                self._record_speech(
+                    self._current, "request_completed", outcome="cancelled"
+                )
                 self.state_changed.emit(self._current.message_key, "idle")
             self._current = None
             return
@@ -162,6 +210,15 @@ class SpeechController(QObject):
     def _start_request(self, request: SpeechRequest) -> None:
         self._current = request
         self._segment_index = 0
+        self._record_speech(
+            request,
+            "request_started",
+            outcome="started",
+            details={
+                "input_characters": len(request.text),
+                "segment_count": len(request.segments),
+            },
+        )
         if (
             request.provider == "siliconflow"
             and not self._siliconflow_api_key()
@@ -178,6 +235,7 @@ class SpeechController(QObject):
             return
         request = self._current
         segment = request.segments[self._segment_index]
+        self._segment_started_at = monotonic()
         spoken_text = segment.text
         effective = resolve_effective_profile(
             request.profile,
@@ -208,6 +266,7 @@ class SpeechController(QObject):
             return
         self._request_id += 1
         self.state_changed.emit(request.message_key, "synthesizing")
+        self._record_speech(request, "synthesis_started", outcome="started")
         self._thread = QThread(self)
         if request.provider == "siliconflow":
             self._worker = self._siliconflow_worker_factory(
@@ -277,7 +336,15 @@ class SpeechController(QObject):
     ) -> None:
         self.state_changed.emit(request.message_key, "error")
         self.failed.emit(request.message_key, error_code)
+        self._record_speech(
+            request,
+            "request_completed",
+            outcome="error",
+            error_code=error_code,
+            duration_ms=(monotonic() - request.started_at) * 1000,
+        )
         self._current = None
+        self._start_next_queued()
 
     @staticmethod
     def _segments_for_provider(
@@ -302,6 +369,7 @@ class SpeechController(QObject):
 
     def stop(self) -> None:
         self._pending = None
+        self._queue.clear()
         self._request_id += 1
         current = self._current
         self._current = None
@@ -313,6 +381,12 @@ class SpeechController(QObject):
             self._player.stop()
         self._player.setSource(QUrl())
         if current is not None:
+            self._record_speech(
+                current,
+                "request_completed",
+                outcome="cancelled",
+                duration_ms=(monotonic() - current.started_at) * 1000,
+            )
             self.state_changed.emit(current.message_key, "idle")
         self._segment_index = 0
 
@@ -333,19 +407,39 @@ class SpeechController(QObject):
     def _synthesis_completed(self, request_id: int, cache_key: str, path: Path) -> None:
         if request_id != self._request_id or self._current is None:
             return
+        self._record_speech(
+            self._current,
+            "synthesis_completed",
+            duration_ms=(monotonic() - self._segment_started_at) * 1000,
+        )
         self._cache[cache_key] = path
         self._play_file(self._current, path)
 
     def _synthesis_cancelled(self, request_id: int) -> None:
         if request_id == self._request_id and self._current:
+            self._record_speech(
+                self._current,
+                "synthesis_completed",
+                outcome="cancelled",
+                duration_ms=(monotonic() - self._segment_started_at) * 1000,
+            )
             self.state_changed.emit(self._current.message_key, "idle")
+            self._current = None
 
     def _synthesis_failed(self, request_id: int, error_code: str) -> None:
         if request_id != self._request_id or self._current is None:
             return
         key = self._current.message_key
+        self._record_speech(
+            self._current,
+            "synthesis_completed",
+            outcome="error",
+            error_code=error_code,
+            duration_ms=(monotonic() - self._segment_started_at) * 1000,
+        )
         self.state_changed.emit(key, "error")
         self.failed.emit(key, error_code)
+        self._current = None
 
     def _thread_finished(self, thread: QThread, worker: QObject) -> None:
         worker.deleteLater()
@@ -359,11 +453,24 @@ class SpeechController(QObject):
             pending = self._pending
             self._pending = None
             self._start_request(pending)
+        elif self._current is None:
+            self._start_next_queued()
+
+    def _start_next_queued(self) -> None:
+        if (
+            self._shutdown
+            or self._thread is not None
+            or self._current is not None
+            or not self._queue
+        ):
+            return
+        self._start_request(self._queue.popleft())
 
     def _play_file(self, request: SpeechRequest, path: Path) -> None:
         self._current = request
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         self._player.play()
+        self._record_speech(request, "playback_started", outcome="started")
         self.state_changed.emit(request.message_key, "playing")
 
     def _playback_state_changed(self, state) -> None:
@@ -377,16 +484,31 @@ class SpeechController(QObject):
                 self._player.setSource(QUrl())
                 self._start_segment()
             else:
+                self._record_speech(
+                    self._current,
+                    "request_completed",
+                    duration_ms=(monotonic() - self._current.started_at) * 1000,
+                )
                 self.state_changed.emit(
                     self._current.message_key, "finished"
                 )
                 self._current = None
+                self._start_next_queued()
 
     def _playback_error(self, *_args) -> None:
         if self._current:
             key = self._current.message_key
+            self._record_speech(
+                self._current,
+                "request_completed",
+                outcome="error",
+                error_code="tts_playback_error",
+                duration_ms=(monotonic() - self._current.started_at) * 1000,
+            )
             self.state_changed.emit(key, "error")
             self.failed.emit(key, "tts_playback_error")
+            self._current = None
+            self._start_next_queued()
 
     def _start_native_segment(
         self, request: SpeechRequest, text: str, effective
@@ -412,6 +534,7 @@ class SpeechController(QObject):
             )
         )
         self.state_changed.emit(request.message_key, "playing")
+        self._record_speech(request, "playback_started", outcome="started")
         self._native_tts.say(text)
 
     def _native_tts_state_changed(self, state) -> None:
@@ -427,15 +550,53 @@ class SpeechController(QObject):
                 self._start_segment()
             else:
                 key = self._current.message_key
+                self._record_speech(
+                    self._current,
+                    "request_completed",
+                    duration_ms=(monotonic() - self._current.started_at) * 1000,
+                )
                 self._current = None
                 self.state_changed.emit(
                     key, "finished"
                 )
+                self._start_next_queued()
         elif state == QTextToSpeech.State.Error:
             key = self._current.message_key
+            self._record_speech(
+                self._current,
+                "request_completed",
+                outcome="error",
+                error_code="tts_playback_error",
+                duration_ms=(monotonic() - self._current.started_at) * 1000,
+            )
             self._current = None
             self.state_changed.emit(key, "error")
             self.failed.emit(key, "tts_playback_error")
+            self._start_next_queued()
+
+    def _record_speech(
+        self,
+        request: SpeechRequest,
+        stage: str,
+        *,
+        outcome: str = "ok",
+        error_code: str = "",
+        duration_ms: float | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        if self._diagnostics is None:
+            return
+        self._diagnostics.record(
+            "tts",
+            stage,
+            outcome=outcome,
+            error_code=error_code,
+            duration_ms=duration_ms,
+            provider=request.provider,
+            request_kind="playback",
+            task_id=request.diagnostic_task_id,
+            details=details,
+        )
 
     def _provider(self) -> str:
         if self._settings is None:

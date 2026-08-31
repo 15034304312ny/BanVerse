@@ -119,6 +119,10 @@ def test_gateway_prepends_system_prompt_and_clamps_temperature():
             [Message("user", "你好")],
             system_prompt="You are Alice.",
             temperature=2.7,
+            top_p=1.7,
+            frequency_penalty=1.0,
+            presence_penalty=1.0,
+            repetition_penalty=1.1,
         )
     )
 
@@ -128,7 +132,31 @@ def test_gateway_prepends_system_prompt_and_clamps_temperature():
         "content": "You are Alice.",
     }
     assert payload["temperature"] == 2.0
+    assert payload["top_p"] == 1.0
+    assert "frequency_penalty" not in payload
+    assert "presence_penalty" not in payload
+    assert "repetition_penalty" not in payload
     assert payload["thinking"] == {"type": "disabled"}
+
+
+def test_gateway_omits_sampling_fields_in_thinking_mode():
+    captured = {}
+
+    def opener(request, *, timeout):
+        captured["payload"] = json.loads(request.data)
+        return FakeResponse([sse("[DONE]")])
+
+    list(
+        DeepSeekHttpGateway("key", opener=opener).stream_chat(
+            MODEL_REASONER,
+            [Message("user", "你好")],
+            temperature=1.3,
+            top_p=0.9,
+        )
+    )
+
+    assert "temperature" not in captured["payload"]
+    assert "top_p" not in captured["payload"]
 
 
 def test_gateway_applies_claude_and_unknown_model_mapping():
@@ -182,3 +210,19 @@ def test_gateway_exposes_http_status_and_api_error_code():
 def test_gateway_rejects_empty_api_key():
     with pytest.raises(ValueError):
         DeepSeekHttpGateway(" ")
+
+
+def test_gateway_allows_short_director_timeout_budget():
+    captured = {}
+
+    def opener(_request, *, timeout):
+        captured["timeout"] = timeout
+        return FakeResponse([sse("[DONE]")])
+
+    list(
+        DeepSeekHttpGateway("key", opener=opener, timeout=3).stream_chat(
+            MODEL_CHAT, []
+        )
+    )
+
+    assert captured["timeout"] == 3

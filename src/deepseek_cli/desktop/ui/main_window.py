@@ -7,9 +7,10 @@ from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,23 +29,40 @@ from ...anthropic_gateway import DeepSeekHttpGateway
 from ...branding import PRODUCT_NAME, PRODUCT_SHORT_NAME
 from ...character_prompt import build_character_prompt, roleplay_memory_query
 from ...chat_service import ChatStreamService
+from ...diagnostics import DiagnosticRecorder
 from ...grsai_gateway import (
     DEFAULT_GRSAI_API_BASE_URL,
     DEFAULT_GRSAI_TEXT_MODEL,
     GrsAiGateway,
 )
 from ...model_catalog import (
-    model_supports_reasoning,
+    MODEL_CHAT,
+    resolve_model,
     text_provider_models,
 )
+from ...relationship_policy import (
+    ProactiveDecision,
+    evaluate_proactive_message,
+    is_repetitive_proactive_message,
+    proactive_context_text,
+    relationship_policy_for,
+    relationship_policy_prompt,
+)
+from ...roleplay_director import (
+    DirectorRequest,
+    assess_director_trigger,
+    build_director_request_text,
+)
+from ...text_models import safe_sampling_options, text_model_capabilities
 from ...tts import TtsProfile, read_tts_profile
 from ..ai_features import (
     OPENING_SYSTEM_SUFFIX,
     PROACTIVE_SYSTEM_SUFFIX,
     CharacterDiscoveryScheduler,
     ProactiveMessageScheduler,
+    assign_image_events,
     classify_role_reply,
-    enrich_role_image_prompt,
+    deserialize_reply_segments,
     explicit_image_request_prompt,
     opening_request,
     proactive_request,
@@ -81,6 +99,7 @@ from ..security.credentials import CredentialStore
 from ..stickers import sticker_by_id
 from ..theme import stylesheet
 from .conversation_edit_dialog import ConversationEditDialog
+from .memory_manager_dialog import MemoryManagerDialog
 from .pages.characters_page import CharactersPage
 from .pages.chat_page import ChatPage
 from .pages.conversations_page import ConversationsPage
@@ -109,6 +128,7 @@ class MainWindow(QMainWindow):
         media_root: str | Path | None = None,
         background_jobs_enabled: bool = True,
         sync_controller: SyncController | None = None,
+        diagnostics: DiagnosticRecorder | None = None,
     ) -> None:
         super().__init__()
         self._chats = chats
@@ -120,10 +140,14 @@ class MainWindow(QMainWindow):
         self._media_root = media_root
         self._background_jobs_enabled = background_jobs_enabled
         self._sync = sync_controller
+        self._diagnostics = diagnostics
         self._speech: SpeechController | None = None
         self._notification_sound: NotificationSound | None = None
         self._shutting_down = False
         self._conversation_id: str | None = None
+        self._pending_conversation_switch: tuple[str, bool] | None = None
+        self._pending_send: tuple[str, str, str] | None = None
+        self._pending_proactive: dict[str, ProactiveDecision] = {}
         # AI 主动开场：新建角色会话时触发，成功则清空模板，失败/无 key 回退模板。
         self._pending_opening_conversation_id: str | None = None
         self._opening_fallbacks: dict[str, str] = {}
@@ -207,8 +231,12 @@ class MainWindow(QMainWindow):
         self.conversations = ConversationsPage(chats)
         self.content = QStackedWidget()
         self.chat_page = ChatPage()
-        self.characters_page = CharactersPage(characters, builtins=builtins)
-        self.settings_page = SettingsPage(settings, credentials)
+        self.characters_page = CharactersPage(
+            characters, builtins=builtins, settings=settings
+        )
+        self.settings_page = SettingsPage(
+            settings, credentials, diagnostics=diagnostics
+        )
         self._refresh_text_model_controls()
         self.content.addWidget(self.chat_page)
         self.content.addWidget(self.characters_page)
@@ -241,12 +269,15 @@ class MainWindow(QMainWindow):
             self._new_character_conversation
         )
         self.characters_page.changed.connect(self._characters_changed)
+        self.characters_page.policy_changed.connect(self._proactive.reload)
         self.chat_page.send_requested.connect(self._send)
         self.chat_page.sticker_requested.connect(self._send_sticker)
         self.chat_page.stop_requested.connect(self._stop)
         self.chat_page.retry_requested.connect(self._send)
+        self.chat_page.image_retry_requested.connect(self._retry_image_event)
         self.chat_page.model_changed.connect(self._change_model)
         self.chat_page.edit_requested.connect(self._edit_current)
+        self.chat_page.memory_requested.connect(self._manage_current_memory)
         self.chat_page.delete_requested.connect(self._delete_current)
         self.chat_page.speech_requested.connect(self._play_message)
         self.chat_page.speech_stop_requested.connect(self._stop_speech)
@@ -317,9 +348,13 @@ class MainWindow(QMainWindow):
             chats=self._chats,
             characters=self._characters,
             settings=self._settings,
-            create_text_service=self._create_text_service,
-            text_api_key=self._text_api_key,
+            create_text_service=self._create_aux_text_service,
+            text_api_key=self._aux_text_api_key,
+            text_model=self._aux_text_model,
+            text_provider=self._resolved_aux_text_provider,
+            sampling_options=self._aux_sampling_options,
             refresh=self._on_summary_refreshed,
+            diagnostics=self._diagnostics,
             parent=self,
         )
         self._character_discovery_runner = CharacterDiscoveryRunner(
@@ -327,6 +362,7 @@ class MainWindow(QMainWindow):
             text_api_key=self._text_api_key,
             on_generated=self._on_random_character_generated,
             on_error=self._on_random_character_error,
+            sampling_options=self._main_sampling_options,
             parent=self,
         )
         self._character_avatar_runner = CharacterAvatarRunner(
@@ -341,9 +377,11 @@ class MainWindow(QMainWindow):
             chats=self._chats,
             characters=self._characters,
             settings=self._settings,
-            create_text_service=self._create_text_service,
+            create_text_service=self._create_aux_text_service,
             create_image_service=self._create_image_service,
-            text_api_key=self._text_api_key,
+            text_api_key=self._aux_text_api_key,
+            text_model=self._aux_text_model,
+            text_provider=self._resolved_aux_text_provider,
             image_api_key=self._image_api_key,
             refresh=lambda: self.conversations.refresh(
                 select_id=self._conversation_id
@@ -351,6 +389,7 @@ class MainWindow(QMainWindow):
             on_image_saved=self._on_autonomous_image_saved,
             on_image_error=self._on_autonomous_image_error,
             media_root=self._media_root,
+            diagnostics=self._diagnostics,
             parent=self,
         )
         if self._background_jobs_enabled:
@@ -360,9 +399,13 @@ class MainWindow(QMainWindow):
             tts_auto_play_check=lambda: self._settings.get_bool(
                 "tts_auto_play", True
             ),
+            diagnostics=self._diagnostics,
             parent=self,
         )
         self._flow.image_described.connect(self._on_flow_image_described)
+        self._flow.image_analysis_failed.connect(
+            self._on_flow_image_analysis_failed
+        )
         self._flow.turn_completed.connect(self._on_turn_completed)
         self._flow.turn_aborted.connect(self._on_turn_aborted)
         self._flow.stream_cleaned_up.connect(self._on_stream_cleaned_up)
@@ -543,6 +586,14 @@ class MainWindow(QMainWindow):
         *,
         force_reload: bool = False,
     ) -> None:
+        if self._flow is not None and self._flow.thread is not None:
+            self._pending_conversation_switch = (
+                conversation_id,
+                force_reload,
+            )
+            self._pending_send = None
+            self._flow.stop()
+            return
         if self._flow is not None and self._flow.busy:
             return
         conversation = self._chats.get_conversation(conversation_id)
@@ -588,6 +639,11 @@ class MainWindow(QMainWindow):
         image_source: str = "",
         sticker_id: str = "",
     ) -> None:
+        if self._flow is not None and self._flow.thread is not None:
+            self._pending_send = (text, image_source, sticker_id)
+            self._pending_conversation_switch = None
+            self._flow.stop()
+            return
         if self._flow is not None and self._flow.busy:
             return
         api_key = self._text_api_key()
@@ -604,6 +660,7 @@ class MainWindow(QMainWindow):
         conversation = self._chats.get_conversation(self._conversation_id)
         if conversation is None:
             return
+        context_started = monotonic()
         sticker = sticker_by_id(sticker_id) if sticker_id else None
         if sticker_id and sticker is None:
             return
@@ -629,7 +686,9 @@ class MainWindow(QMainWindow):
             if conversation.character_id
             else None
         )
-        role_memory_enabled = self._role_memory_enabled()
+        role_memory_enabled = self._role_memory_enabled(
+            character.id if character is not None else ""
+        )
         role_state = self._role_state(conversation) if character else {}
         history = self._chats.completed_history(
             conversation.id,
@@ -655,6 +714,17 @@ class MainWindow(QMainWindow):
                 recalled_memories=recalled_memories,
             )
             if character
+            else None
+        )
+        director_request = (
+            self._roleplay_director_request(
+                conversation,
+                character.card,
+                history,
+                text,
+                role_state,
+            )
+            if character is not None
             else None
         )
         turn = self._chats.create_turn(
@@ -686,7 +756,18 @@ class MainWindow(QMainWindow):
             history=history,
             request_text=text,
             system_prompt=(
-                character_prompt.system if character_prompt else ""
+                "\n\n".join(
+                    (
+                        character_prompt.system,
+                        relationship_policy_prompt(
+                            relationship_policy_for(
+                                self._settings, character.id
+                            )
+                        ),
+                    )
+                )
+                if character_prompt and character is not None
+                else ""
             ),
             example_messages=(
                 character_prompt.examples if character_prompt else ()
@@ -696,17 +777,18 @@ class MainWindow(QMainWindow):
             ),
             image_service=image_service,
             image_path=image_path,
-            temperature=(
-                self._roleplay_temperature()
-                if character is not None
-                and not self._text_model_supports_reasoning(
-                    conversation.model
-                )
-                else None
-            ),
+            provider=self._text_provider(),
+            image_provider=self._image_provider(),
+            context_duration_ms=(monotonic() - context_started) * 1000,
             turn_id=turn.id,
             conversation_id=conversation.id,
             request_kind="user",
+            director_request=director_request,
+            **(
+                self._roleplay_sampling_options(conversation.model)
+                if character is not None
+                else {}
+            ),
         )
 
     def _text_provider(self) -> str:
@@ -719,23 +801,29 @@ class MainWindow(QMainWindow):
     def _text_model_supports_reasoning(self, conversation_model: str) -> bool:
         """按实际供应商模型能力判断是否应关闭采样参数。"""
 
-        if self._text_provider() != "grsai":
-            return model_supports_reasoning(conversation_model)
-        configured = self._settings.get(
+        return self._text_capabilities(
+            self._text_provider(), conversation_model
+        ).reasoning
+
+    def _text_capabilities(
+        self,
+        provider: str,
+        model: str,
+        *,
+        grsai_model: str = "",
+    ):
+        configured = grsai_model or self._settings.get(
             "grsai_text_model", DEFAULT_GRSAI_TEXT_MODEL
-        ).strip()
+        )
         catalog = deserialize_models(
             self._settings.get("model_catalog_grsai", "")
         )
-        selected = next(
-            (
-                model
-                for model in catalog
-                if model.provider == "grsai" and model.id == configured
-            ),
-            None,
+        return text_model_capabilities(
+            provider,
+            model,
+            configured_model=configured,
+            catalog=catalog,
         )
-        return bool(selected and selected.supports("reasoning"))
 
     def _refresh_text_model_controls(
         self, selected_model: str = ""
@@ -766,24 +854,44 @@ class MainWindow(QMainWindow):
         return ""
 
     def _text_api_key(self) -> str:
-        if self._text_provider() == "grsai":
+        return self._text_api_key_for(self._text_provider())
+
+    def _text_api_key_for(self, provider: str) -> str:
+        if provider == "grsai":
             return self._credential_value("get_grsai_text_api_key")
         return self._credential_value("get_api_key")
 
-    def _create_text_gateway(self, api_key: str):
+    def _create_text_gateway_for(
+        self,
+        provider: str,
+        api_key: str,
+        *,
+        grsai_model: str = "",
+        timeout_seconds: int | None = None,
+    ):
         if self._gateway_factory is not None:
             return self._gateway_factory(api_key)
-        if self._text_provider() == "grsai":
-            return GrsAiGateway(
-                api_key,
-                base_url=self._settings.get(
+        if provider == "grsai":
+            options = {
+                "base_url": self._settings.get(
                     "grsai_text_base_url", DEFAULT_GRSAI_API_BASE_URL
                 ),
-                model=self._settings.get(
-                    "grsai_text_model", DEFAULT_GRSAI_TEXT_MODEL
+                "model": (
+                    grsai_model
+                    or self._settings.get(
+                        "grsai_text_model", DEFAULT_GRSAI_TEXT_MODEL
+                    )
                 ),
-            )
+            }
+            if timeout_seconds is not None:
+                options["timeout"] = timeout_seconds
+            return GrsAiGateway(api_key, **options)
+        if timeout_seconds is not None:
+            return DeepSeekHttpGateway(api_key, timeout=timeout_seconds)
         return DeepSeekHttpGateway(api_key)
+
+    def _create_text_gateway(self, api_key: str):
+        return self._create_text_gateway_for(self._text_provider(), api_key)
 
     def _create_text_service(self, api_key: str) -> ChatStreamService:
         """Capture settings and construct the gateway on the UI thread.
@@ -795,6 +903,84 @@ class MainWindow(QMainWindow):
 
         gateway = self._create_text_gateway(api_key)
         return ChatStreamService(lambda: gateway)
+
+    def _requested_aux_text_provider(self) -> str:
+        provider = self._settings.get("aux_text_provider", "inherit").lower()
+        return provider if provider in {"inherit", "deepseek", "grsai"} else "inherit"
+
+    def _resolved_aux_text_provider(self) -> str:
+        requested = self._requested_aux_text_provider()
+        main_provider = self._text_provider()
+        if requested == "inherit":
+            return main_provider
+        if self._text_api_key_for(requested):
+            return requested
+        return main_provider
+
+    def _aux_text_api_key(self) -> str:
+        return self._text_api_key_for(self._resolved_aux_text_provider())
+
+    def _aux_grsai_model(self) -> str:
+        requested = self._requested_aux_text_provider()
+        resolved = self._resolved_aux_text_provider()
+        if requested == "grsai" and resolved == "grsai":
+            auxiliary = self._settings.get(
+                "aux_grsai_text_model", ""
+            ).strip()
+            if auxiliary:
+                return auxiliary
+        return (
+            self._settings.get(
+                "grsai_text_model", DEFAULT_GRSAI_TEXT_MODEL
+            ).strip()
+            or DEFAULT_GRSAI_TEXT_MODEL
+        )
+
+    def _aux_text_model(self, conversation_model: str) -> str:
+        requested = self._requested_aux_text_provider()
+        resolved = self._resolved_aux_text_provider()
+        if requested != "inherit" and requested == resolved:
+            if resolved == "deepseek":
+                return (
+                    resolve_model(
+                        self._settings.get("aux_deepseek_model", MODEL_CHAT)
+                    )
+                    or MODEL_CHAT
+                )
+            return MODEL_CHAT
+        return conversation_model or MODEL_CHAT
+
+    def _create_aux_text_service(
+        self,
+        api_key: str,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> ChatStreamService:
+        provider = self._resolved_aux_text_provider()
+        gateway = self._create_text_gateway_for(
+            provider,
+            api_key,
+            grsai_model=(self._aux_grsai_model() if provider == "grsai" else ""),
+            timeout_seconds=timeout_seconds,
+        )
+        return ChatStreamService(lambda: gateway)
+
+    def _aux_sampling_options(
+        self, model: str, temperature: float
+    ) -> dict[str, float]:
+        provider = self._resolved_aux_text_provider()
+        capabilities = self._text_capabilities(
+            provider,
+            model,
+            grsai_model=(self._aux_grsai_model() if provider == "grsai" else ""),
+        )
+        return safe_sampling_options(capabilities, temperature=temperature)
+
+    def _main_sampling_options(
+        self, model: str, temperature: float
+    ) -> dict[str, float]:
+        capabilities = self._text_capabilities(self._text_provider(), model)
+        return safe_sampling_options(capabilities, temperature=temperature)
 
     def _image_provider(self) -> str:
         provider = self._settings.get("image_provider", "siliconflow").lower()
@@ -854,9 +1040,11 @@ class MainWindow(QMainWindow):
         *,
         fallback_prompt: str = "",
         segment_index: int | None = None,
-    ) -> None:
+        role_state: dict | None = None,
+        trigger: str = "semantic",
+    ) -> bool:
         if self._image_runner is not None:
-            self._image_runner.enqueue(
+            return self._image_runner.enqueue(
                 conversation_id,
                 turn_id,
                 character_name,
@@ -864,7 +1052,10 @@ class MainWindow(QMainWindow):
                 answer,
                 fallback_prompt=fallback_prompt,
                 segment_index=segment_index,
+                role_state=role_state,
+                trigger=trigger,
             )
+        return False
 
     def _on_autonomous_image_saved(self, conversation_id: str) -> None:
         """发图成功后的主窗口侧 UI 动作。"""
@@ -883,19 +1074,104 @@ class MainWindow(QMainWindow):
     def _on_autonomous_image_error(
         self, conversation_id: str, error_code: str
     ) -> None:
-        if conversation_id == self._conversation_id:
-            self.chat_page.add_image_error(error_code)
+        if (
+            conversation_id == self._conversation_id
+            and not (self._flow is not None and self._flow.busy)
+        ):
+            self._open_conversation(conversation_id, force_reload=True)
+
+    def _retry_image_event(self, turn_id: str, event_id: str) -> None:
+        """按持久化图片事件重试，不重新调用角色正文模型。"""
+
+        conversation_id = self._conversation_id or ""
+        conversation = self._chats.get_conversation(conversation_id)
+        turn = self._chats.get_turn(conversation_id, turn_id)
+        character = (
+            self._characters.get(conversation.character_id)
+            if conversation is not None and conversation.character_id
+            else None
+        )
+        if turn is None or character is None:
+            return
+        segments = deserialize_reply_segments(turn.assistant_segments_json)
+        selected = next(
+            (
+                (index, segment)
+                for index, segment in enumerate(segments)
+                if segment.kind == "image"
+                and (not event_id or segment.event_id == event_id)
+            ),
+            None,
+        )
+        if selected is None:
+            return
+        index, segment = selected
+        try:
+            self._chats.set_assistant_image_status(
+                turn_id, "pending", segment_index=index
+            )
+        except (KeyError, ValueError):
+            return
+        queued = self._enqueue_autonomous_image(
+            conversation_id,
+            turn_id,
+            character.name,
+            character.card,
+            turn.assistant_content,
+            fallback_prompt=segment.prompt,
+            segment_index=index,
+            role_state=self._role_state(conversation),
+            trigger="retry",
+        )
+        if not queued:
+            current_turn = self._chats.get_turn(conversation_id, turn_id)
+            current_segments = (
+                deserialize_reply_segments(current_turn.assistant_segments_json)
+                if current_turn is not None
+                else ()
+            )
+            current_image = (
+                current_segments[index] if index < len(current_segments) else None
+            )
+            if current_image is not None and current_image.status == "pending":
+                with suppress(KeyError, ValueError):
+                    self._chats.set_assistant_image_status(
+                        turn_id,
+                        "failed",
+                        (
+                            "image_authentication"
+                            if not self._image_api_key()
+                            else "image_service_error"
+                        ),
+                        segment_index=index,
+                    )
+        self._open_conversation(conversation_id, force_reload=True)
 
     def _on_flow_image_described(self, turn_id: str, description: str) -> None:
         """图片理解结果落库；空描述（服务异常时）容错忽略。"""
 
         if not turn_id:
             return
+        started = monotonic()
         try:
             self._chats.set_user_image_description(turn_id, description)
         except ValueError:
+            self._record_chat_diagnostic(
+                "image_description_persisted",
+                outcome="error",
+                error_code="turn_not_found",
+                duration_ms=(monotonic() - started) * 1000,
+            )
             return
+        self._record_chat_diagnostic(
+            "image_description_persisted",
+            duration_ms=(monotonic() - started) * 1000,
+            details={"output_characters": len(description)},
+        )
         self._schedule_sync()
+
+    def _on_flow_image_analysis_failed(self, error_code: str) -> None:
+        self.chat_page.add_image_analysis_error(error_code)
 
     def _on_turn_completed(
         self,
@@ -905,8 +1181,43 @@ class MainWindow(QMainWindow):
         reasoning: str,
         request_kind: str,
     ) -> None:
-        plan = classify_role_reply(answer)
+        if request_kind == "proactive":
+            conversation = self._chats.get_conversation(conversation_id)
+            character_id = (
+                conversation.character_id if conversation is not None else ""
+            )
+            recent_proactive = [
+                turn.assistant_content
+                for turn in self._chats.list_turns(conversation_id)
+                if turn.id != turn_id
+                and turn.origin == "proactive"
+                and turn.status == "completed"
+                and turn.assistant_content
+            ][-5:]
+            if is_repetitive_proactive_message(answer, recent_proactive):
+                self._chats.delete_turn(turn_id)
+                if character_id:
+                    self._settings.set(
+                        f"proactive_last_status_{character_id}",
+                        "本次生成内容与近期主动消息过于相似，已在发送前拦截。",
+                    )
+                self._record_chat_diagnostic(
+                    "proactive_repeat_suppressed",
+                    outcome="cancelled",
+                    request_kind=request_kind,
+                )
+                self._schedule_sync()
+                return
+        classification_started = monotonic()
+        plan = assign_image_events(classify_role_reply(answer), turn_id)
         visible_answer = plan.visible_text or answer.strip()
+        self._record_chat_diagnostic(
+            "reply_classified",
+            duration_ms=(monotonic() - classification_started) * 1000,
+            request_kind=request_kind,
+            details={"segment_count": len(plan.segments)},
+        )
+        persistence_started = monotonic()
         try:
             self._chats.complete_turn(
                 turn_id,
@@ -919,7 +1230,20 @@ class MainWindow(QMainWindow):
         except KeyError:
             # 会话在流式生成期间被删除（外键级联删除了轮次）：
             # 放弃本轮投递，避免在排队槽中抛出未捕获异常。
+            self._record_chat_diagnostic(
+                "turn_persisted",
+                outcome="error",
+                error_code="turn_not_found",
+                duration_ms=(monotonic() - persistence_started) * 1000,
+                request_kind=request_kind,
+            )
             return
+        self._record_chat_diagnostic(
+            "turn_persisted",
+            duration_ms=(monotonic() - persistence_started) * 1000,
+            request_kind=request_kind,
+            details={"output_characters": len(visible_answer)},
+        )
         if request_kind == "opening":
             # AI 开场成功：清空模板开场白，避免重开会话/后续历史与 AI
             # 生成的首条消息重复。
@@ -934,18 +1258,12 @@ class MainWindow(QMainWindow):
             if conversation and conversation.character_id
             else None
         )
-        image_time = datetime.now().astimezone()
         fallback_prompt = ""
         image_segment_index: int | None = None
         if character is not None and plan.has_image_action:
             for index, segment in enumerate(plan.segments):
                 if segment.kind == "image" and segment.prompt:
-                    fallback_prompt = enrich_role_image_prompt(
-                        character.name,
-                        character.card,
-                        segment.prompt,
-                        current_time=image_time,
-                    )
+                    fallback_prompt = segment.prompt
                     image_segment_index = index
                     break
         turn = self._chats.get_turn(conversation_id, turn_id)
@@ -953,14 +1271,16 @@ class MainWindow(QMainWindow):
             turn.user_content if turn is not None else ""
         )
         if character is not None and explicit_prompt and not fallback_prompt:
-            fallback_prompt = enrich_role_image_prompt(
-                character.name,
-                character.card,
-                explicit_prompt,
-                current_time=image_time,
-            )
+            fallback_prompt = explicit_prompt
         if character is not None:
-            self._enqueue_autonomous_image(
+            trigger = (
+                "explicit"
+                if explicit_prompt
+                else "role_action"
+                if image_segment_index is not None
+                else "semantic"
+            )
+            queued = self._enqueue_autonomous_image(
                 conversation_id,
                 turn_id,
                 character.name,
@@ -968,7 +1288,35 @@ class MainWindow(QMainWindow):
                 visible_answer,
                 fallback_prompt=fallback_prompt,
                 segment_index=image_segment_index,
+                role_state=self._role_state(conversation),
+                trigger=trigger,
             )
+            if image_segment_index is not None and not queued:
+                current_turn = self._chats.get_turn(conversation_id, turn_id)
+                current_segments = (
+                    deserialize_reply_segments(
+                        current_turn.assistant_segments_json
+                    )
+                    if current_turn is not None
+                    else ()
+                )
+                current_image = (
+                    current_segments[image_segment_index]
+                    if image_segment_index < len(current_segments)
+                    else None
+                )
+                if current_image is not None and current_image.status == "pending":
+                    with suppress(KeyError, ValueError):
+                        self._chats.set_assistant_image_status(
+                            turn_id,
+                            "failed",
+                            (
+                                "image_authentication"
+                                if not self._image_api_key()
+                                else "image_service_error"
+                            ),
+                            segment_index=image_segment_index,
+                        )
         profile = read_tts_profile(character.card if character else None)
         self._flow.prepare_delivery(
             ReplyDelivery(
@@ -986,6 +1334,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not turn_id:
             return
+        started = monotonic()
         if request_kind in {"proactive", "opening"}:
             # 主动/开场消息失败不留失败气泡；开场失败由 _on_stream_cleaned_up
             # 回退到角色模板。
@@ -994,6 +1343,13 @@ class MainWindow(QMainWindow):
             self._chats.fail_turn(turn_id, "failed", error_code)
         else:
             self._chats.fail_turn(turn_id, "cancelled")
+        self._record_chat_diagnostic(
+            "turn_persisted",
+            outcome="error" if error_code else "cancelled",
+            error_code=error_code,
+            duration_ms=(monotonic() - started) * 1000,
+            request_kind=request_kind,
+        )
         self._schedule_sync()
 
     def _on_stream_cleaned_up(
@@ -1003,6 +1359,36 @@ class MainWindow(QMainWindow):
         pending_delivery: ReplyDelivery | None,
     ) -> None:
         self.conversations.refresh(select_id=self._conversation_id)
+        pending_switch = self._pending_conversation_switch
+        pending_send = self._pending_send
+        self._pending_conversation_switch = None
+        self._pending_send = None
+        if pending_switch is not None or pending_send is not None:
+            self.chat_page.discard_stream()
+            self.chat_page.finish_stream()
+            if request_kind == "opening" and pending_delivery is None:
+                self._pending_opening_conversation_id = None
+                fallback = self._opening_fallbacks.pop(
+                    request_conversation_id or "", ""
+                )
+                self._ensure_opening_fallback(
+                    request_conversation_id, fallback
+                )
+            if pending_switch is not None:
+                conversation_id, force_reload = pending_switch
+                self._open_conversation(
+                    conversation_id, force_reload=force_reload
+                )
+            elif self._conversation_id:
+                self._open_conversation(
+                    self._conversation_id, force_reload=True
+                )
+            if pending_send is not None:
+                QTimer.singleShot(
+                    0,
+                    lambda values=pending_send: self._send(*values),
+                )
+            return
         if pending_delivery is not None:
             self.chat_page.discard_stream()
             if pending_delivery.conversation_id == self._conversation_id:
@@ -1062,6 +1448,28 @@ class MainWindow(QMainWindow):
     ) -> None:
         delivery = self._active_delivery
         self.chat_page.discard_stream()
+        if segment.kind == "image":
+            current_segment = segment
+            if delivery is not None:
+                turn = self._chats.get_turn(
+                    delivery.conversation_id, delivery.turn_id
+                )
+                segments = (
+                    deserialize_reply_segments(turn.assistant_segments_json)
+                    if turn is not None
+                    else ()
+                )
+                if index < len(segments):
+                    current_segment = segments[index]
+            if current_segment.image_path:
+                self.chat_page.add_image_event(
+                    image_path=current_segment.image_path
+                )
+            elif current_segment.status in {"failed", "cancelled"}:
+                self.chat_page.add_image_error(current_segment.error_code)
+            else:
+                self.chat_page.add_image_event(pending=True)
+            return
         self.chat_page.add_assistant_segment(
             segment.text,
             message_key=(
@@ -1078,7 +1486,11 @@ class MainWindow(QMainWindow):
         self, message_key: str, text: str, profile: TtsProfile
     ) -> None:
         if self._speech is not None:
-            self._speech.speak(message_key, text, profile)
+            enqueue = getattr(self._speech, "enqueue", None)
+            if callable(enqueue):
+                enqueue(message_key, text, profile)
+            else:
+                self._speech.speak(message_key, text, profile)
 
     def _on_delivery_finished(self, delivery: ReplyDelivery) -> None:
         self._active_delivery = None
@@ -1089,7 +1501,9 @@ class MainWindow(QMainWindow):
             turn = self._chats.get_turn(
                 delivery.conversation_id, delivery.turn_id
             )
-            if turn is not None and turn.assistant_image_path:
+            if turn is not None and (
+                turn.assistant_image_path or delivery.plan.has_image_action
+            ):
                 self._open_conversation(
                     delivery.conversation_id, force_reload=True
                 )
@@ -1135,7 +1549,7 @@ class MainWindow(QMainWindow):
         ):
             self._on_random_character_error("duplicate_character")
             return
-        character = self._characters.create(card)
+        character = self._characters.create(card, source_type="ai_generated")
         opening = str(character.card["data"].get("first_mes", "")).strip()
         model = (
             self._settings.get("default_model")
@@ -1245,18 +1659,61 @@ class MainWindow(QMainWindow):
             self._conversation_id is None
         ):
             return
-        if self._sync is not None and self._sync.enabled:
-            self._sync.claim_proactive(self._conversation_id)
+        decision = self._proactive_decision(self._conversation_id)
+        if decision is None or not decision.allowed:
             return
-        self._begin_proactive_message(self._conversation_id)
+        if self._sync is not None and self._sync.enabled:
+            self._pending_proactive[self._conversation_id] = decision
+            self._sync.claim_proactive(
+                self._conversation_id,
+                event_id=decision.event_id,
+                ttl_seconds=decision.lease_ttl_seconds,
+            )
+            return
+        self._begin_proactive_message(self._conversation_id, decision)
 
     def _on_proactive_claimed(
         self, conversation_id: str, acquired: bool
     ) -> None:
         if acquired:
-            self._begin_proactive_message(conversation_id)
+            decision = self._pending_proactive.pop(conversation_id, None)
+            self._begin_proactive_message(conversation_id, decision)
+        else:
+            self._pending_proactive.pop(conversation_id, None)
 
-    def _begin_proactive_message(self, conversation_id: str) -> None:
+    def _proactive_decision(
+        self,
+        conversation_id: str,
+        *,
+        current_time: datetime | None = None,
+    ) -> ProactiveDecision | None:
+        conversation = self._chats.get_conversation(conversation_id)
+        if conversation is None or not conversation.character_id:
+            return None
+        character = self._characters.get(conversation.character_id)
+        if character is None:
+            return None
+        decision = evaluate_proactive_message(
+            relationship_policy_for(self._settings, character.id),
+            self._chats.list_turns(conversation_id),
+            self._role_state(conversation),
+            globally_enabled=self._settings.get_bool(
+                "proactive_enabled", False
+            ),
+            conversation_id=conversation_id,
+            current_time=current_time,
+        )
+        self._settings.set(
+            f"proactive_last_status_{character.id}",
+            decision.explanation,
+        )
+        return decision
+
+    def _begin_proactive_message(
+        self,
+        conversation_id: str,
+        decision: ProactiveDecision | None = None,
+    ) -> None:
         """租约确认后生成主动消息；切换会话或管线占线时放弃。"""
 
         if (
@@ -1274,8 +1731,18 @@ class MainWindow(QMainWindow):
         character = self._characters.get(conversation.character_id)
         if character is None:
             return
+        current_time = datetime.now().astimezone()
+        current_decision = self._proactive_decision(
+            conversation_id, current_time=current_time
+        )
+        if current_decision is None or not current_decision.allowed:
+            return
+        if decision is not None and decision.event_id != current_decision.event_id:
+            return
+        decision = current_decision
+        context_started = monotonic()
 
-        role_memory_enabled = self._role_memory_enabled()
+        role_memory_enabled = self._role_memory_enabled(character.id)
         role_state = self._role_state(conversation)
         history = self._chats.completed_history(
             conversation.id, max_turns=ROLEPLAY_RECENT_TURNS
@@ -1289,7 +1756,7 @@ class MainWindow(QMainWindow):
             if role_memory_enabled
             else ()
         )
-        current_time = datetime.now().astimezone()
+        policy = relationship_policy_for(self._settings, character.id)
         character_prompt = build_character_prompt(
             character.card,
             history,
@@ -1309,9 +1776,20 @@ class MainWindow(QMainWindow):
         self.chat_page.set_generating(True)
         system_prompt = "\n\n".join(
             part
-            for part in (character_prompt.system, PROACTIVE_SYSTEM_SUFFIX)
+            for part in (
+                character_prompt.system,
+                relationship_policy_prompt(policy),
+                PROACTIVE_SYSTEM_SUFFIX,
+            )
             if part.strip()
         )
+        recent_proactive = [
+            turn.assistant_content
+            for turn in self._chats.list_turns(conversation.id)
+            if turn.origin == "proactive"
+            and turn.status == "completed"
+            and turn.assistant_content
+        ][-3:]
         self._flow.begin_stream(
             service=self._create_text_service(api_key),
             model=conversation.model,
@@ -1319,20 +1797,24 @@ class MainWindow(QMainWindow):
             request_text=proactive_request(
                 character.name,
                 current_time=current_time,
+            )
+            + "\n"
+            + proactive_context_text(
+                policy,
+                role_state,
+                recent_proactive,
+                decision.explanation,
             ),
             system_prompt=system_prompt,
             example_messages=character_prompt.examples,
             post_history_prompt=character_prompt.post_history,
-            temperature=(
-                self._roleplay_temperature()
-                if not self._text_model_supports_reasoning(
-                    conversation.model
-                )
-                else None
-            ),
+            provider=self._text_provider(),
+            image_provider=self._image_provider(),
+            context_duration_ms=(monotonic() - context_started) * 1000,
             turn_id=turn.id,
             conversation_id=conversation.id,
             request_kind="proactive",
+            **self._roleplay_sampling_options(conversation.model),
         )
 
     def _on_sync_data_changed(self) -> None:
@@ -1377,12 +1859,13 @@ class MainWindow(QMainWindow):
         if character is None:
             self._recover_opening(conversation.id, fallback_opening)
             return
+        context_started = monotonic()
 
         # 模板开场白只用于失败兜底，绝不能作为已经发生的 assistant 历史
         # 传给模型；否则模型会误以为自己已经开过场并引用不存在的上下文。
         history = ()
         current_time = datetime.now().astimezone()
-        role_memory_enabled = self._role_memory_enabled()
+        role_memory_enabled = self._role_memory_enabled(character.id)
         role_state = self._role_state(conversation)
         recalled_memories = (
             self._chats.recalled_memories(
@@ -1404,7 +1887,7 @@ class MainWindow(QMainWindow):
             current_time=current_time,
         )
         turn = self._chats.create_proactive_turn(
-            conversation.id, conversation.model
+            conversation.id, conversation.model, origin="opening"
         )
         self._chats.mark_streaming(turn.id)
         self._schedule_sync()
@@ -1414,6 +1897,11 @@ class MainWindow(QMainWindow):
             part
             for part in (
                 character_prompt.system,
+                relationship_policy_prompt(
+                    relationship_policy_for(
+                        self._settings, character.id
+                    )
+                ),
                 OPENING_SYSTEM_SUFFIX,
             )
             if part.strip()
@@ -1428,16 +1916,13 @@ class MainWindow(QMainWindow):
             system_prompt=system_prompt,
             example_messages=character_prompt.examples,
             post_history_prompt=character_prompt.post_history,
-            temperature=(
-                self._roleplay_temperature()
-                if not self._text_model_supports_reasoning(
-                    conversation.model
-                )
-                else None
-            ),
+            provider=self._text_provider(),
+            image_provider=self._image_provider(),
+            context_duration_ms=(monotonic() - context_started) * 1000,
             turn_id=turn.id,
             conversation_id=conversation.id,
             request_kind="opening",
+            **self._roleplay_sampling_options(conversation.model),
         )
 
     def _recover_opening(self, conversation_id: str, fallback: str) -> None:
@@ -1466,6 +1951,38 @@ class MainWindow(QMainWindow):
         if self._sync is not None:
             self._sync.schedule_sync()
 
+    def _record_chat_diagnostic(
+        self,
+        stage: str,
+        *,
+        outcome: str = "ok",
+        error_code: str = "",
+        duration_ms: float | None = None,
+        request_kind: str = "user",
+        details: dict[str, object] | None = None,
+    ) -> None:
+        if self._diagnostics is None:
+            return
+        conversation = (
+            self._chats.get_conversation(self._conversation_id)
+            if self._conversation_id
+            else None
+        )
+        self._diagnostics.record(
+            "text_chat",
+            stage,
+            outcome=outcome,
+            error_code=error_code,
+            duration_ms=duration_ms,
+            provider=self._text_provider(),
+            model=conversation.model if conversation is not None else "",
+            request_kind=request_kind,
+            task_id=(
+                self._flow.diagnostic_task_id if self._flow is not None else ""
+            ),
+            details=details,
+        )
+
     def _enqueue_pending_summaries(self) -> None:
         if self._summary_runner is not None:
             self._summary_runner.enqueue_pending()
@@ -1479,8 +1996,86 @@ class MainWindow(QMainWindow):
             return 1.3
         return max(0.0, min(value, 2.0))
 
+    def _roleplay_sampling_options(self, model: str) -> dict[str, float]:
+        capabilities = self._text_capabilities(self._text_provider(), model)
+        mode = self._settings.get(
+            "roleplay_sampling_mode", "temperature"
+        ).lower()
+        if mode == "provider_default":
+            return {}
+        if mode == "top_p":
+            try:
+                top_p = float(self._settings.get("roleplay_top_p", "0.9"))
+            except ValueError:
+                top_p = 0.9
+            return safe_sampling_options(capabilities, top_p=top_p)
+        return safe_sampling_options(
+            capabilities, temperature=self._roleplay_temperature()
+        )
+
+    def _roleplay_director_request(
+        self,
+        conversation: Conversation,
+        card: dict,
+        history,
+        user_text: str,
+        role_state: dict,
+    ) -> DirectorRequest | None:
+        """只为高价值用户轮次构造一次隐藏辅助规划请求。"""
+
+        if not self._settings.get_bool("roleplay_director_enabled", False):
+            return None
+        if not self._settings.get_bool(
+            f"roleplay_director_conversation_{conversation.id}", True
+        ):
+            return None
+        try:
+            max_extra_calls = int(
+                self._settings.get("roleplay_director_max_extra_calls", "1")
+            )
+            threshold = int(
+                self._settings.get("roleplay_director_threshold", "6")
+            )
+            timeout_seconds = int(
+                self._settings.get("roleplay_director_timeout_seconds", "8")
+            )
+        except ValueError:
+            return None
+        if max_extra_calls < 1:
+            return None
+        decision = assess_director_trigger(user_text, role_state)
+        if not decision.should_trigger(threshold):
+            return None
+        api_key = self._aux_text_api_key()
+        if not api_key:
+            return None
+        timeout_seconds = max(3, min(timeout_seconds, 20))
+        model = self._aux_text_model(conversation.model)
+        try:
+            service = self._create_aux_text_service(
+                api_key,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception:
+            return None
+        sampling = self._aux_sampling_options(model, 0.2)
+        return DirectorRequest(
+            service=service,
+            model=model,
+            request_text=build_director_request_text(
+                card,
+                history,
+                user_text,
+                role_state=role_state,
+            ),
+            timeout_seconds=timeout_seconds,
+            temperature=sampling.get("temperature"),
+            top_p=sampling.get("top_p"),
+            trigger_reasons=decision.reasons,
+        )
+
     def _role_state(self, conversation) -> dict:
-        if not self._role_memory_enabled():
+        if not self._role_memory_enabled(conversation.character_id or ""):
             return {}
         try:
             state = json.loads(conversation.role_state_json or "{}")
@@ -1488,8 +2083,14 @@ class MainWindow(QMainWindow):
             return {}
         return state if isinstance(state, dict) else {}
 
-    def _role_memory_enabled(self) -> bool:
-        return self._settings.get_bool("role_memory_enabled", True)
+    def _role_memory_enabled(self, character_id: str = "") -> bool:
+        if not self._settings.get_bool("role_memory_enabled", True):
+            return False
+        if character_id:
+            return self._settings.get_bool(
+                f"role_memory_character_{character_id}", True
+            )
+        return True
 
     def _profile_for_current_conversation(self) -> TtsProfile:
         conversation = (
@@ -1536,6 +2137,18 @@ class MainWindow(QMainWindow):
         if self._conversation_id:
             self._edit_conversation(self._conversation_id)
 
+    def _manage_current_memory(self) -> None:
+        if not self._conversation_id or self._busy_generating():
+            return
+        dialog = MemoryManagerDialog(
+            self._chats,
+            self._settings,
+            self._conversation_id,
+            self,
+        )
+        dialog.exec()
+        self._schedule_sync()
+
     def _edit_conversation(self, conversation_id: str) -> None:
         if self._flow is not None and self._flow.busy:
             return
@@ -1543,7 +2156,15 @@ class MainWindow(QMainWindow):
         if conversation is None:
             return
         dialog = ConversationEditDialog(
-            conversation, self._characters.list(), self
+            conversation,
+            self._characters.list(),
+            self,
+            director_enabled=self._settings.get_bool(
+                f"roleplay_director_conversation_{conversation.id}", True
+            ),
+            director_available=self._settings.get_bool(
+                "roleplay_director_enabled", False
+            ),
         )
         if not dialog.exec():
             return
@@ -1555,6 +2176,10 @@ class MainWindow(QMainWindow):
         )
         self._chats.bind_character(
             conversation.id, dialog.character.currentData()
+        )
+        self._settings.set(
+            f"roleplay_director_conversation_{conversation.id}",
+            "true" if dialog.director.isChecked() else "false",
         )
         self._schedule_sync()
         self.conversations.refresh(select_id=conversation.id)
@@ -1631,6 +2256,9 @@ class MainWindow(QMainWindow):
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._pending_conversation_switch = None
+        self._pending_send = None
+        self._pending_proactive.clear()
         self._proactive.stop()
         self._character_discovery.stop()
         self.settings_page.shutdown_model_refresh()

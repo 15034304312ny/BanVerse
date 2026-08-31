@@ -60,7 +60,7 @@ def test_two_devices_converge_text_character_and_media(tmp_path):
     characters = CharacterRepository(first_db)
     card = empty_card("同步角色")
     card["data"]["description"] = "会在电脑和手机之间保持一致。"
-    character = characters.create(card, str(image))
+    character = characters.create(card, str(image), source_type="imported")
     chats = ChatRepository(first_db)
     conversation = chats.create_conversation(
         title="跨设备会话",
@@ -96,6 +96,7 @@ def test_two_devices_converge_text_character_and_media(tmp_path):
     remote_turn = ChatRepository(second_db).list_turns(conversation.id)[0]
     assert remote_character is not None
     assert remote_character.name == "同步角色"
+    assert remote_character.source_type == "imported"
     assert remote_conversation is not None
     assert remote_conversation.opening_message == "晚上好。"
     for synced_path in (
@@ -109,6 +110,42 @@ def test_two_devices_converge_text_character_and_media(tmp_path):
     restored_segments = json.loads(remote_turn.assistant_segments_json)
     assert restored_segments[1]["image_path"] == remote_turn.assistant_image_path
 
+    first_db.close()
+    second_db.close()
+
+
+def test_two_devices_sync_memory_and_privacy_erasing_tombstone(tmp_path):
+    store = SyncServerStore(tmp_path / "server.db", tmp_path / "server-media")
+    account_id = store.create_account()["account_id"]
+    first_db = Database(tmp_path / "first.db")
+    second_db = Database(tmp_path / "second.db")
+    first_chats = ChatRepository(first_db)
+    conversation = first_chats.create_conversation(title="记忆同步")
+    memory = first_chats.create_memory(
+        conversation.id,
+        "preference_boundary",
+        "不要催促回复",
+        source_type="user_explicit",
+    )
+    first = _engine(first_db, store, account_id, "desktop-001", tmp_path / "pc")
+    second = _engine(
+        second_db, store, account_id, "android-001", tmp_path / "phone"
+    )
+
+    first.sync_once()
+    second.sync_once()
+    remote = ChatRepository(second_db).get_memory(memory.id)
+    assert remote is not None
+    assert remote.content == "不要催促回复"
+    assert remote.status == "active"
+
+    first_chats.delete_memory(memory.id)
+    first.sync_once()
+    second.sync_once()
+    deleted = ChatRepository(second_db).get_memory(memory.id)
+    assert deleted is not None
+    assert deleted.status == "deleted"
+    assert deleted.content == ""
     first_db.close()
     second_db.close()
 

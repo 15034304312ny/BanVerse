@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from ...character_cards import dump_card, empty_card, normalize_card
@@ -98,6 +99,7 @@ class Character:
     card: dict
     created_at: str
     updated_at: str
+    source_type: str = "user_created"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +119,28 @@ class Turn:
     assistant_image_path: str = ""
     user_sticker: str = ""
     assistant_segments_json: str = "[]"
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryRecord:
+    id: str
+    conversation_id: str
+    character_id: str | None
+    category: str
+    content: str
+    source_type: str
+    source_turn_id: str | None
+    confidence: float
+    salience: float
+    status: str
+    pinned: bool
+    created_at: str
+    updated_at: str
+    last_used_at: str = ""
+    expires_at: str = ""
+    superseded_by_id: str = ""
+    confirmed_at: str = ""
+    deleted_at: str = ""
 
 
 _CONVERSATION_SELECT = """
@@ -307,8 +331,17 @@ class ChatRepository:
             user_sticker=user_sticker,
         )
 
-    def create_proactive_turn(self, conversation_id: str, model: str) -> Turn:
-        """创建仅含助手消息的主动会话轮次。"""
+    def create_proactive_turn(
+        self,
+        conversation_id: str,
+        model: str,
+        *,
+        origin: str = "proactive",
+    ) -> Turn:
+        """创建仅含助手消息的主动轮次或首次开场轮次。"""
+
+        if origin not in {"proactive", "opening"}:
+            raise ValueError(origin)
 
         turn_id, now = str(uuid4()), _now()
         with self._db:
@@ -316,8 +349,8 @@ class ChatRepository:
                 """INSERT INTO turns
                    (id, conversation_id, user_content, model, status,
                     created_at, updated_at, origin)
-                   VALUES (?, ?, '', ?, 'pending', ?, ?, 'proactive')""",
-                (turn_id, conversation_id, model, now, now),
+                   VALUES (?, ?, '', ?, 'pending', ?, ?, ?)""",
+                (turn_id, conversation_id, model, now, now, origin),
             )
             self._db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -333,7 +366,7 @@ class ChatRepository:
             "pending",
             "",
             now,
-            "proactive",
+            origin,
         )
 
     def mark_streaming(self, turn_id: str) -> None:
@@ -424,6 +457,8 @@ class ChatRepository:
                     and segments[segment_index].get("kind") == "image"
                 ):
                     segments[segment_index]["image_path"] = value
+                    segments[segment_index]["status"] = "completed"
+                    segments[segment_index]["error_code"] = ""
                     segments_json = json.dumps(
                         segments,
                         ensure_ascii=False,
@@ -438,6 +473,144 @@ class ChatRepository:
             self._db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
                 (now, row["conversation_id"]),
+            )
+
+    def ensure_assistant_image_event(
+        self,
+        turn_id: str,
+        prompt: str,
+        event_id: str,
+    ) -> int:
+        """确保已完成轮次只有一个图片事件，并返回其分段索引。"""
+
+        normalized_prompt = " ".join(str(prompt or "").split()).strip()[:1_500]
+        normalized_event = " ".join(str(event_id or "").split()).strip()[:80]
+        if not normalized_prompt or not normalized_event:
+            raise ValueError("图片事件缺少提示词或幂等 ID")
+        now = _now()
+        with self._db:
+            row = self._db.execute(
+                """SELECT conversation_id, status, assistant_segments_json
+                   FROM turns WHERE id = ?""",
+                (turn_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(turn_id)
+            if row["status"] != "completed":
+                raise ValueError("只能给已完成轮次添加图片事件")
+            try:
+                segments = json.loads(row["assistant_segments_json"] or "[]")
+            except (TypeError, ValueError):
+                segments = []
+            if not isinstance(segments, list):
+                segments = []
+            for index, segment in enumerate(segments):
+                if isinstance(segment, dict) and segment.get("kind") == "image":
+                    segment["prompt"] = normalized_prompt
+                    segment["event_id"] = normalized_event
+                    segment["status"] = "pending"
+                    segment["error_code"] = ""
+                    self._db.execute(
+                        """UPDATE turns SET assistant_segments_json = ?, updated_at = ?
+                           WHERE id = ?""",
+                        (
+                            json.dumps(
+                                segments,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            now,
+                            turn_id,
+                        ),
+                    )
+                    self._db.execute(
+                        "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                        (now, row["conversation_id"]),
+                    )
+                    return index
+            segments.append(
+                {
+                    "kind": "image",
+                    "text": "",
+                    "prompt": normalized_prompt,
+                    "image_path": "",
+                    "event_id": normalized_event,
+                    "status": "pending",
+                    "error_code": "",
+                }
+            )
+            self._db.execute(
+                """UPDATE turns SET assistant_segments_json = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    json.dumps(segments, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                    turn_id,
+                ),
+            )
+            self._db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, row["conversation_id"]),
+            )
+            return len(segments) - 1
+
+    def set_assistant_image_status(
+        self,
+        turn_id: str,
+        status: str,
+        error_code: str = "",
+        *,
+        segment_index: int | None = None,
+    ) -> None:
+        """持久化图片事件状态；失败不会改变已完成文字轮次。"""
+
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"pending", "failed", "cancelled"}:
+            raise ValueError(status)
+        with self._db:
+            row = self._db.execute(
+                "SELECT assistant_segments_json FROM turns WHERE id = ?",
+                (turn_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(turn_id)
+            try:
+                segments = json.loads(row["assistant_segments_json"] or "[]")
+            except (TypeError, ValueError):
+                segments = []
+            if not isinstance(segments, list):
+                raise ValueError("图片分段数据无效")
+            indexes = (
+                (segment_index,)
+                if segment_index is not None
+                else tuple(range(len(segments)))
+            )
+            changed = False
+            for index in indexes:
+                if (
+                    isinstance(index, int)
+                    and 0 <= index < len(segments)
+                    and isinstance(segments[index], dict)
+                    and segments[index].get("kind") == "image"
+                ):
+                    segments[index]["status"] = normalized_status
+                    segments[index]["error_code"] = (
+                        str(error_code or "").strip()[:120]
+                        if normalized_status == "failed"
+                        else ""
+                    )
+                    changed = True
+                    break
+            if not changed:
+                raise ValueError("图片事件不存在")
+            self._db.execute(
+                """UPDATE turns SET assistant_segments_json = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    json.dumps(segments, ensure_ascii=False, separators=(",", ":")),
+                    _now(),
+                    turn_id,
+                ),
             )
 
     def set_ai_summary(self, conversation_id: str, summary: str) -> None:
@@ -676,6 +849,14 @@ class ChatRepository:
         query_terms = _memory_terms(query)
         if not query_terms or max_items <= 0:
             return []
+        governed = self._recalled_memory_records(
+            conversation_id,
+            query_terms,
+            max_items=max_items,
+        )
+        remaining = max(0, min(int(max_items), 6) - len(governed))
+        if remaining <= 0:
+            return governed
         rows = self._db.execute(
             """SELECT user_content, assistant_content,
                       user_image_description, origin, created_at, rowid
@@ -713,20 +894,446 @@ class ChatRepository:
             if parts:
                 scored.append((score, int(row["rowid"]), "；".join(parts)))
         selected = sorted(scored, key=lambda item: item[0], reverse=True)[
-            : max(1, min(int(max_items), 6))
+            :remaining
         ]
         selected.sort(key=lambda item: item[1])
-        return [item[2] for item in selected]
+        return [*governed, *(item[2] for item in selected)]
+
+    def _recalled_memory_records(
+        self,
+        conversation_id: str,
+        query_terms: set[str],
+        *,
+        max_items: int,
+    ) -> list[str]:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return []
+        now = _now()
+        if conversation.character_id:
+            scope_sql = "character_id = ?"
+            scope_value = conversation.character_id
+        else:
+            scope_sql = "conversation_id = ?"
+            scope_value = conversation_id
+        rows = self._db.execute(
+            f"""SELECT * FROM memories
+                WHERE {scope_sql} AND status IN ('active', 'corrected')
+                  AND content != ''
+                  AND (expires_at = '' OR expires_at > ?)
+                ORDER BY pinned DESC, salience DESC, updated_at DESC
+                LIMIT 300""",
+            (scope_value, now),
+        ).fetchall()
+        scored: list[tuple[float, sqlite3.Row]] = []
+        for row in rows:
+            overlap = query_terms & _memory_terms(row["content"])
+            if not overlap and not row["pinned"]:
+                continue
+            score = (
+                sum(min(len(term), 4) for term in overlap)
+                + float(row["salience"] or 0)
+                + (3.0 if row["pinned"] else 0.0)
+            )
+            scored.append((score, row))
+        selected = sorted(scored, key=lambda item: item[0], reverse=True)[
+            : max(0, min(int(max_items), 6))
+        ]
+        if selected:
+            used_at = _now()
+            with self._db:
+                self._db.executemany(
+                    "UPDATE memories SET last_used_at = ? WHERE id = ?",
+                    [(used_at, row["id"]) for _, row in selected],
+                )
+        labels = {
+            "user_fact": "用户已确认",
+            "shared_experience": "共同经历",
+            "preference_boundary": "偏好与边界",
+            "open_thread": "未完话题",
+            "character_commitment": "角色承诺",
+        }
+        return [
+            f"{labels.get(row['category'], '记忆')}：{row['content']}"
+            for _, row in selected
+        ]
+
+    def list_memories(
+        self,
+        conversation_id: str,
+        *,
+        query: str = "",
+        include_inactive: bool = True,
+    ) -> list[MemoryRecord]:
+        sql = "SELECT * FROM memories WHERE conversation_id = ?"
+        params: list[object] = [conversation_id]
+        if not include_inactive:
+            sql += " AND status IN ('active', 'corrected')"
+        if query.strip():
+            sql += " AND content LIKE ?"
+            params.append(f"%{' '.join(query.split())[:120]}%")
+        sql += " ORDER BY pinned DESC, updated_at DESC, rowid DESC"
+        return [
+            self._memory_record(row)
+            for row in self._db.execute(sql, params).fetchall()
+        ]
+
+    def create_memory(
+        self,
+        conversation_id: str,
+        category: str,
+        content: str,
+        *,
+        source_type: str = "user_managed",
+        source_turn_id: str = "",
+        confidence: float = 1.0,
+        salience: float = 0.7,
+        status: str = "active",
+        retention_days: int = 0,
+    ) -> MemoryRecord:
+        allowed_categories = {
+            "user_fact",
+            "shared_experience",
+            "preference_boundary",
+            "open_thread",
+            "character_commitment",
+        }
+        allowed_statuses = {
+            "candidate",
+            "active",
+            "corrected",
+            "superseded",
+            "deleted",
+        }
+        normalized = " ".join(str(content).split()).strip()[:600]
+        if category not in allowed_categories or status not in allowed_statuses:
+            raise ValueError("记忆类别或状态无效")
+        if source_type in {
+            "assistant_inferred",
+            "image_analysis",
+            "imported",
+        } and status in {"active", "corrected"}:
+            status = "candidate"
+        if not normalized and status != "deleted":
+            raise ValueError("记忆内容不能为空")
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            raise KeyError(conversation_id)
+        memory_id = str(uuid4())
+        now = _now()
+        expires_at = ""
+        if retention_days > 0:
+            expires_at = (
+                datetime.now(timezone.utc) + timedelta(days=retention_days)
+            ).isoformat(timespec="milliseconds")
+        with self._db:
+            self._db.execute(
+                """INSERT INTO memories(
+                       id, conversation_id, character_id, category, content,
+                       source_type, source_turn_id, confidence, salience,
+                       status, pinned, created_at, updated_at, expires_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+                (
+                    memory_id,
+                    conversation_id,
+                    conversation.character_id,
+                    category,
+                    normalized,
+                    source_type[:80],
+                    source_turn_id or None,
+                    max(0.0, min(float(confidence), 1.0)),
+                    max(0.0, min(float(salience), 1.0)),
+                    status,
+                    now,
+                    now,
+                    expires_at,
+                ),
+            )
+        return self.get_memory(memory_id)  # type: ignore[return-value]
+
+    def get_memory(self, memory_id: str) -> MemoryRecord | None:
+        row = self._db.execute(
+            "SELECT * FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        return self._memory_record(row) if row else None
+
+    def update_memory(
+        self,
+        memory_id: str,
+        *,
+        content: str | None = None,
+        status: str | None = None,
+        pinned: bool | None = None,
+    ) -> None:
+        current = self.get_memory(memory_id)
+        if current is None:
+            raise KeyError(memory_id)
+        next_content = (
+            " ".join(content.split()).strip()[:600]
+            if content is not None
+            else current.content
+        )
+        next_status = status or current.status
+        if (
+            content is not None
+            and next_content != current.content
+            and status is None
+            and current.status in {"candidate", "active", "corrected"}
+        ):
+            next_status = "corrected"
+        if next_status not in {
+            "candidate",
+            "active",
+            "corrected",
+            "superseded",
+            "deleted",
+        }:
+            raise ValueError("记忆状态无效")
+        if not next_content and next_status != "deleted":
+            raise ValueError("记忆内容不能为空")
+        next_pinned = current.pinned if pinned is None else bool(pinned)
+        deleted_at = _now() if next_status == "deleted" else ""
+        confirmed_at = current.confirmed_at
+        if current.status == "candidate" and next_status in {
+            "active",
+            "corrected",
+        }:
+            confirmed_at = _now()
+        if next_status == "deleted":
+            next_content = ""
+            next_pinned = False
+        with self._db:
+            self._db.execute(
+                """UPDATE memories
+                   SET content = ?, status = ?, pinned = ?, updated_at = ?,
+                       deleted_at = ?, confirmed_at = ? WHERE id = ?""",
+                (
+                    next_content,
+                    next_status,
+                    int(next_pinned),
+                    _now(),
+                    deleted_at,
+                    confirmed_at,
+                    memory_id,
+                ),
+            )
+
+    def delete_memory(self, memory_id: str) -> None:
+        self.update_memory(memory_id, status="deleted")
+
+    def clear_memories(self, conversation_id: str) -> int:
+        rows = self._db.execute(
+            """SELECT id FROM memories
+               WHERE conversation_id = ? AND status != 'deleted'""",
+            (conversation_id,),
+        ).fetchall()
+        for row in rows:
+            self.delete_memory(row["id"])
+        return len(rows)
+
+    def reset_role_continuity(self, conversation_id: str) -> int:
+        count = self.clear_memories(conversation_id)
+        self.set_role_state(conversation_id, {})
+        return count
+
+    def upsert_role_memories(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        user_text: str,
+        role_state: dict,
+        *,
+        retention_days: int = 0,
+        max_items: int = 200,
+    ) -> None:
+        if not isinstance(role_state, dict):
+            return
+        candidates: list[tuple[str, str, str, float, float]] = []
+        for content in role_state.get("user_facts", [])[:6]:
+            text = " ".join(str(content).split()).strip()
+            supported = self._memory_supported_by_user(text, user_text)
+            candidates.append(
+                (
+                    "user_fact",
+                    text,
+                    "user_explicit" if supported else "assistant_inferred",
+                    0.95 if supported else 0.45,
+                    0.8,
+                )
+            )
+        relationship = role_state.get("relationship")
+        if isinstance(relationship, dict):
+            for content in relationship.get("boundaries", [])[:6]:
+                text = " ".join(str(content).split()).strip()
+                supported = self._memory_supported_by_user(text, user_text)
+                candidates.append(
+                    (
+                        "preference_boundary",
+                        text,
+                        "user_explicit" if supported else "assistant_inferred",
+                        0.98 if supported else 0.45,
+                        0.95,
+                    )
+                )
+        for content in role_state.get("shared_memories", [])[:6]:
+            candidates.append(
+                (
+                    "shared_experience",
+                    " ".join(str(content).split()).strip(),
+                    "role_state",
+                    0.75,
+                    0.7,
+                )
+            )
+        for content in role_state.get("open_threads", [])[:6]:
+            text = " ".join(str(content).split()).strip()
+            category = (
+                "character_commitment"
+                if re.search(r"(?:角色|答应|承诺|约好|会替|会陪)", text)
+                else "open_thread"
+            )
+            candidates.append(
+                (
+                    category,
+                    text,
+                    "role_state",
+                    0.7,
+                    0.65,
+                )
+            )
+        correction = bool(
+            re.search(r"(?:不是|不再|改成|纠正|记错|其实|更正)", user_text)
+        )
+        for category, content, source, confidence, salience in candidates:
+            if not content:
+                continue
+            duplicate = self._db.execute(
+                """SELECT id FROM memories
+                   WHERE conversation_id = ? AND category = ? AND content = ?
+                     AND status != 'deleted'""",
+                (conversation_id, category, content[:600]),
+            ).fetchone()
+            if duplicate:
+                continue
+            status = (
+                "candidate"
+                if source == "assistant_inferred"
+                else "active"
+            )
+            created = self.create_memory(
+                conversation_id,
+                category,
+                content,
+                source_type=source,
+                source_turn_id=turn_id,
+                confidence=confidence,
+                salience=salience,
+                status=status,
+                retention_days=retention_days,
+            )
+            if correction and status == "active" and category in {
+                "user_fact",
+                "preference_boundary",
+            }:
+                self._supersede_conflicting_memories(created, user_text)
+        self._prune_memories(conversation_id, max_items=max_items)
+
+    def _supersede_conflicting_memories(
+        self, replacement: MemoryRecord, user_text: str
+    ) -> None:
+        replacement_terms = _memory_terms(replacement.content)
+        user_terms = _memory_terms(user_text)
+        rows = self._db.execute(
+            """SELECT * FROM memories
+               WHERE conversation_id = ? AND category = ?
+                 AND status = 'active' AND id != ?""",
+            (
+                replacement.conversation_id,
+                replacement.category,
+                replacement.id,
+            ),
+        ).fetchall()
+        now = _now()
+        with self._db:
+            for row in rows:
+                old_terms = _memory_terms(row["content"])
+                if old_terms & replacement_terms & user_terms:
+                    self._db.execute(
+                        """UPDATE memories SET status = 'superseded',
+                           superseded_by_id = ?, updated_at = ? WHERE id = ?""",
+                        (replacement.id, now, row["id"]),
+                    )
+
+    def _prune_memories(self, conversation_id: str, *, max_items: int) -> None:
+        limit = max(10, min(int(max_items), 2_000))
+        rows = self._db.execute(
+            """SELECT id FROM memories
+               WHERE conversation_id = ?
+                 AND status IN ('active', 'corrected', 'candidate')
+                 AND pinned = 0
+               ORDER BY updated_at DESC, rowid DESC""",
+            (conversation_id,),
+        ).fetchall()
+        for row in rows[limit:]:
+            self.delete_memory(row["id"])
+
+    @staticmethod
+    def _memory_supported_by_user(content: str, user_text: str) -> bool:
+        memory_terms = _memory_terms(content)
+        user_terms = _memory_terms(user_text)
+        if not memory_terms or not user_terms:
+            return False
+        overlap = memory_terms & user_terms
+        return len(overlap) >= min(2, max(1, len(memory_terms) // 3))
+
+    @staticmethod
+    def _memory_record(row) -> MemoryRecord:
+        return MemoryRecord(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            character_id=row["character_id"],
+            category=row["category"],
+            content=row["content"],
+            source_type=row["source_type"],
+            source_turn_id=row["source_turn_id"],
+            confidence=float(row["confidence"]),
+            salience=float(row["salience"]),
+            status=row["status"],
+            pinned=bool(row["pinned"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_used_at=row["last_used_at"],
+            expires_at=row["expires_at"],
+            superseded_by_id=row["superseded_by_id"],
+            confirmed_at=row["confirmed_at"],
+            deleted_at=row["deleted_at"],
+        )
 
 
 class CharacterRepository:
+    SOURCE_TYPES = frozenset(
+        {"user_created", "imported", "built_in", "ai_generated", "synced"}
+    )
+
     def __init__(self, database: Database) -> None:
         self._db = database.connection
 
-    def create(self, card: dict | None = None, avatar_path: str = "") -> Character:
+    def create(
+        self,
+        card: dict | None = None,
+        avatar_path: str = "",
+        *,
+        source_type: str = "user_created",
+    ) -> Character:
         character_id = str(uuid4())
         with self._db:
-            self.create_with_id(character_id, card or empty_card(), avatar_path, connection=self._db)
+            self.create_with_id(
+                character_id,
+                card or empty_card(),
+                avatar_path,
+                source_type=source_type,
+                connection=self._db,
+            )
         return self.get(character_id)  # type: ignore[return-value]
 
     def exists(self, character_id: str, *, connection=None) -> bool:
@@ -741,16 +1348,21 @@ class CharacterRepository:
         card: dict,
         avatar_path: str = "",
         *,
+        source_type: str = "user_created",
         connection=None,
     ) -> None:
         """在调用方事务内用受信任的稳定 ID 创建角色。"""
 
+        if source_type not in self.SOURCE_TYPES:
+            raise ValueError(f"未知角色来源：{source_type}")
         normalized = normalize_card(card)
         now = _now()
         db = connection or self._db
         db.execute(
-            """INSERT INTO characters(id, name, avatar_path, card_json, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO characters(
+                   id, name, avatar_path, card_json, created_at, updated_at,
+                   source_type
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 character_id,
                 normalized["data"]["name"],
@@ -758,8 +1370,28 @@ class CharacterRepository:
                 dump_card(normalized),
                 now,
                 now,
+                source_type,
             ),
         )
+
+    def set_source_type(
+        self,
+        character_id: str,
+        source_type: str,
+        *,
+        connection=None,
+    ) -> None:
+        """修正受信任来源标签，不改动用户编辑过的角色卡内容。"""
+
+        if source_type not in self.SOURCE_TYPES:
+            raise ValueError(f"未知角色来源：{source_type}")
+        db = connection or self._db
+        statement = "UPDATE characters SET source_type = ? WHERE id = ?"
+        if connection is None:
+            with self._db:
+                db.execute(statement, (source_type, character_id))
+        else:
+            db.execute(statement, (source_type, character_id))
 
     def update(
         self,
@@ -833,7 +1465,8 @@ class CharacterRepository:
     def _character(row) -> Character:
         return Character(
             row["id"], row["name"], row["avatar_path"],
-            normalize_card(json.loads(row["card_json"])), row["created_at"], row["updated_at"]
+            normalize_card(json.loads(row["card_json"])), row["created_at"],
+            row["updated_at"], row["source_type"]
         )
 
 

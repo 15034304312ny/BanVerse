@@ -53,7 +53,7 @@ class DeepSeekHttpGateway:
         self._api_key = value
         self._opener = opener
         self._endpoint = endpoint
-        self._timeout = max(10, int(timeout))
+        self._timeout = max(1, int(timeout))
 
     def stream_chat(
         self,
@@ -62,6 +62,10 @@ class DeepSeekHttpGateway:
         *,
         system_prompt: str = "",
         temperature: float | None = None,
+        top_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        repetition_penalty: float | None = None,
     ) -> Iterable[StreamDelta]:
         provider_model = resolve_provider_model(model)
         payload_messages: list[dict[str, str]] = []
@@ -84,10 +88,16 @@ class DeepSeekHttpGateway:
                 )
             },
         }
-        if temperature is not None:
+        sampling_enabled = provider_model == MODEL_CHAT
+        if temperature is not None and sampling_enabled:
             payload["temperature"] = max(
                 0.0, min(float(temperature), 2.0)
             )
+        if top_p is not None and sampling_enabled:
+            payload["top_p"] = max(0.0, min(float(top_p), 1.0))
+        # DeepSeek currently deprecates frequency/presence penalties and does
+        # not declare repetition_penalty; intentionally never serialize them.
+        _ = (frequency_penalty, presence_penalty, repetition_penalty)
         request = Request(
             self._endpoint,
             data=json.dumps(

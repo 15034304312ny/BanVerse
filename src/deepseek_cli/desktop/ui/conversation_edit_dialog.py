@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -23,7 +24,15 @@ from .widgets.avatar_widget import AvatarWidget
 
 
 class ConversationEditDialog(QDialog):
-    def __init__(self, conversation: Conversation, characters: list[Character], parent=None):
+    def __init__(
+        self,
+        conversation: Conversation,
+        characters: list[Character],
+        parent=None,
+        *,
+        director_enabled: bool = True,
+        director_available: bool = False,
+    ):
         super().__init__(parent)
         self.setWindowTitle("编辑会话")
         if is_android_platform():
@@ -58,6 +67,12 @@ class ConversationEditDialog(QDialog):
         index = self.character.findData(conversation.character_id)
         self.character.setCurrentIndex(max(0, index))
         layout.addRow("绑定角色", self.character)
+        self.director = QCheckBox("允许该会话在关键轮次使用一次隐藏规划")
+        self.director.setChecked(director_enabled)
+        self.director.setEnabled(director_available)
+        if not director_available:
+            self.director.setToolTip("全局关键轮次 Director 当前未启用")
+        layout.addRow("关键轮次规划", self.director)
         note = QLabel("更换角色只影响后续请求，不会改写已有消息或插入开场白。")
         note.setWordWrap(True)
         note.setProperty("muted", True)

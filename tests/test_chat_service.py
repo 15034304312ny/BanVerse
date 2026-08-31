@@ -70,12 +70,14 @@ def test_service_forwards_roleplay_options():
             *,
             system_prompt="",
             temperature=None,
+            top_p=None,
         ):
             captured.update(
                 model=model,
                 messages=list(messages),
                 system_prompt=system_prompt,
                 temperature=temperature,
+                top_p=top_p,
             )
             yield StreamDelta(content="角色回复")
 
@@ -85,13 +87,14 @@ def test_service_forwards_roleplay_options():
             [],
             "你好",
             system_prompt="角色设定",
-            temperature=1.3,
+            top_p=0.92,
         )
     )
 
     assert events[-1].type is ChatEventType.COMPLETED
     assert captured["system_prompt"] == "角色设定"
-    assert captured["temperature"] == 1.3
+    assert captured["temperature"] is None
+    assert captured["top_p"] == 0.92
 
 
 def test_service_places_character_post_history_instruction_nearest_user_turn():

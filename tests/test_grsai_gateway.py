@@ -71,6 +71,8 @@ def test_grsai_gateway_uses_configured_openai_compatible_endpoint():
             [Message("user", "在吗")],
             system_prompt="扮演角色",
             temperature=1.3,
+            top_p=0.9,
+            frequency_penalty=0.5,
         )
     )
 
@@ -86,7 +88,9 @@ def test_grsai_gateway_uses_configured_openai_compatible_endpoint():
         ],
         "stream": True,
         "temperature": 1.3,
+        "top_p": 0.9,
     }
+    assert "frequency_penalty" not in captured["payload"]
     assert captured["timeout"] == 180
     assert result == [
         StreamDelta(reasoning_content="想"),
@@ -167,3 +171,19 @@ def test_grsai_gateway_exposes_http_error_details():
     assert caught.value.status_code == 401
     assert caught.value.error_code == "invalid_api_key"
     assert "bad key" in str(caught.value)
+
+
+def test_grsai_gateway_allows_short_director_timeout_budget():
+    captured = {}
+
+    def opener(_request, *, timeout):
+        captured["timeout"] = timeout
+        return FakeResponse([sse("[DONE]")])
+
+    list(
+        GrsAiGateway("key", opener=opener, timeout=3).stream_chat(
+            "ignored", []
+        )
+    )
+
+    assert captured["timeout"] == 3

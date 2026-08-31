@@ -59,7 +59,7 @@ def _run_delivery_to_completion(qtbot, controller, timeout: int = 5_000) -> None
 
 
 def test_begin_delivery_emits_segments_in_order_with_speech(qtbot) -> None:
-    """对白段逐条投递，且只在第一个对白段触发一次 TTS。"""
+    """对白段逐条投递，每段分别进入 TTS 队列。"""
 
     controller = _controller(tts_auto_play=True)
     segments = (
@@ -87,9 +87,10 @@ def test_begin_delivery_emits_segments_in_order_with_speech(qtbot) -> None:
 
     assert started == [delivery]
     assert emitted == ["第一句。", "她抬头看了看。", "第二句。"]
-    assert len(speech_calls) == 1
+    assert len(speech_calls) == 2
     assert speech_calls[0][0] == "turn:turn-1:segment:0"
-    assert speech_calls[0][1] == "第一句。\n第二句。"
+    assert speech_calls[0][1] == "第一句。"
+    assert speech_calls[1] == ("turn:turn-1:segment:2", "第二句。")
 
 
 def test_delivery_reasoning_attached_only_to_first_segment(qtbot) -> None:

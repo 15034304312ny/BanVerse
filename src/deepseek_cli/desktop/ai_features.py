@@ -13,6 +13,14 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from ..character_cards import CharacterCardError, empty_card, normalize_card
 from ..gateway import Message
+from ..multimodal import (
+    build_scene_context,
+    ensure_visual_identity,
+    has_current_image_share_intent,
+    image_event_id,
+    read_visual_identity,
+    scene_context_prompt,
+)
 from ..time_context import local_time_context
 from .data.repositories import SettingsRepository
 
@@ -23,7 +31,8 @@ SUMMARY_SYSTEM_PROMPT = """你是中文聊天列表摘要器。
 
 ROLE_MEMORY_SYSTEM_PROMPT = """你是中文角色扮演会话的“列表摘要与连续性记录器”。
 你会收到角色名、上一版状态、用户本轮消息和角色本轮回复。保留已确立事实，只根据本轮
-明确内容更新；不要臆测用户的隐私、身份或心理诊断。情绪变化必须能追溯到事件，强烈
+明确内容更新；不要臆测用户的隐私、身份或心理诊断。user_facts 和 boundaries 只能记录
+用户本轮亲自明确陈述的内容，角色猜测、图片推断和助手自己的说法不得写入。情绪变化必须能追溯到事件，强烈
 情绪具有惯性，不能因为话题切换就自动归零；关系数值只在本轮确有靠近、疏远、冲突或
 修复时小幅变化，不能把普通礼貌直接解释成亲密关系。
 
@@ -32,7 +41,7 @@ ROLE_MEMORY_SYSTEM_PROMPT = """你是中文角色扮演会话的“列表摘要�
 
 role_state 只使用以下字段，内容未知时用空字符串或空数组：
 {
-  "scene":{"location":"","time":"","ongoing_action":""},
+  "scene":{"location":"","time":"","ongoing_action":"","outfit":""},
   "emotion":{"primary":"","secondary":"","cause":"","intensity":0,"inertia":0},
   "character_state":{"mood":"","current_desire":"","current_goal":"","concern":"","unspoken_tendency":""},
   "relationship":{"stage":"","preferred_address":"","trust":0,"intimacy":0,"tension":0,"recent_change":"","boundaries":[]},
@@ -85,6 +94,9 @@ AUTONOMOUS_IMAGE_SYSTEM_PROMPT = """你是“虚构角色自主分享图片”�
 如果最近一条用户消息明确表达了“给我发图片、照片或自拍”“让我看看你现在的样子”
 “帮我画/生成一张图”等索图含义，应选择发送，并结合角色设定与当前场景构造图片。
 关键词规则会独立工作，但你仍须根据完整语义单独判断，以识别没有固定关键词的委婉请求。
+如果角色消息只是想象一张图、讨论历史照片、引用别人发图或明确表示不发送，必须选择
+false。用户没有索图时，只有角色刚刚确实表达了“现在发送/分享/拍给你看”的意图才可
+选择 true，不能在普通文字回复后擅自追加装饰图片。
 
 只输出一行严格 JSON，不要 Markdown、解释或额外文本：
 {"send_image":false,"prompt":""}
@@ -129,6 +141,9 @@ class ReplySegment:
     text: str = ""
     prompt: str = ""
     image_path: str = ""
+    event_id: str = ""
+    status: str = "ready"
+    error_code: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +306,9 @@ def serialize_reply_segments(segments: Sequence[ReplySegment]) -> str:
             "text": segment.text,
             "prompt": segment.prompt,
             "image_path": segment.image_path,
+            "event_id": segment.event_id,
+            "status": segment.status,
+            "error_code": segment.error_code,
         }
         for segment in segments
         if segment.kind in {"dialogue", "narration", "image"}
@@ -317,12 +335,74 @@ def deserialize_reply_segments(value: str) -> tuple[ReplySegment, ...]:
             str(item.get("prompt", "") or "").split()
         ).strip()[:1_500]
         image_path = str(item.get("image_path", "") or "").strip()[:2_000]
+        event_id = str(item.get("event_id", "") or "").strip()[:80]
+        status = str(item.get("status", "ready") or "ready").strip().lower()
+        if status not in {"ready", "pending", "completed", "failed", "cancelled"}:
+            status = "ready"
+        error_code = str(item.get("error_code", "") or "").strip()[:120]
         if kind == "image" and not (prompt or image_path):
             continue
         if kind != "image" and not text:
             continue
-        result.append(ReplySegment(kind, text, prompt, image_path))
+        result.append(
+            ReplySegment(
+                kind,
+                text,
+                prompt,
+                image_path,
+                event_id,
+                status,
+                error_code,
+            )
+        )
     return tuple(result)
+
+
+def assign_image_events(plan: ReplyPlan, turn_id: str) -> ReplyPlan:
+    """为分段计划中的图片建立每轮唯一、可幂等恢复的事件。"""
+
+    image_index = 0
+    result: list[ReplySegment] = []
+    for segment in plan.segments:
+        if segment.kind != "image":
+            result.append(segment)
+            continue
+        if image_index >= 1:
+            continue
+        result.append(
+            ReplySegment(
+                "image",
+                prompt=segment.prompt,
+                image_path=segment.image_path,
+                event_id=segment.event_id or image_event_id(turn_id, image_index),
+                status=(
+                    "completed"
+                    if segment.image_path
+                    else "pending"
+                    if segment.status == "ready"
+                    else segment.status
+                ),
+                error_code=segment.error_code,
+            )
+        )
+        image_index += 1
+    return ReplyPlan(tuple(result))
+
+
+def append_image_event(
+    plan: ReplyPlan,
+    turn_id: str,
+    prompt: str,
+) -> ReplyPlan:
+    """AI 语义决策确认后在计划末尾追加一次图片事件。"""
+
+    if plan.has_image_action:
+        return assign_image_events(plan, turn_id)
+    value = " ".join(str(prompt or "").split()).strip()[:1_500]
+    if not value:
+        return plan
+    segments = (*plan.segments, ReplySegment("image", prompt=value))
+    return assign_image_events(ReplyPlan(segments), turn_id)
 
 
 def image_time_scene_prompt(current_time: datetime | None = None) -> str:
@@ -346,23 +426,36 @@ def enrich_role_image_prompt(
     prompt: str,
     *,
     current_time: datetime | None = None,
+    role_state: dict | None = None,
+    recent_event: str = "",
 ) -> str:
     """把简短的发图动作补成可直接交给文生图服务的提示词。"""
 
     data = card.get("data", {}) if isinstance(card, dict) else {}
     if not isinstance(data, dict):
         data = {}
+    identity = read_visual_identity(card)
     details = []
-    for key in ("description", "personality", "scenario"):
+    for key in ("scenario",):
         value = " ".join(str(data.get(key, "") or "").split()).strip()
         if value:
             details.append(value[:500])
     profile = "；".join(details)
+    scene = build_scene_context(
+        role_state,
+        recent_event=recent_event,
+        current_time=current_time,
+    )
+    outfit = scene.outfit or identity.default_outfit
     parts = [
         f"虚构成年角色{character_name}" if character_name else "虚构成年角色",
+        f"稳定视觉身份：{identity.description}" if identity.description else "",
+        f"本次已知服装：{outfit}" if outfit else "",
         profile,
         prompt.strip()[:1_000],
         image_time_scene_prompt(current_time),
+        scene_context_prompt(scene),
+        f"负面约束：{identity.negative_prompt}",
         "自然生活感，画面完整，无界面、对话气泡、水印或大段文字",
     ]
     return "；".join(part for part in parts if part)
@@ -449,6 +542,7 @@ def _image_action_prompt(cue: str) -> str:
     if not (
         any(word in source for word in _IMAGE_WORDS)
         and any(verb in source for verb in _IMAGE_VERBS)
+        and has_current_image_share_intent(source)
     ):
         return ""
     prompt = re.sub(
@@ -580,7 +674,7 @@ def _sanitize_role_state(value, *, processed_turn_id: str = "") -> dict:
     if isinstance(scene, dict):
         result["scene"] = {
             key: short_text(scene.get(key))
-            for key in ("location", "time", "ongoing_action")
+            for key in ("location", "time", "ongoing_action", "outfit")
         }
     emotion = value.get("emotion")
     if isinstance(emotion, dict):
@@ -777,7 +871,7 @@ def parse_discovered_character(
     if gender:
         app_extension["gender"] = gender
     data["extensions"] = {"deepseek_chat": app_extension}
-    return normalize_card(card)
+    return normalize_card(ensure_visual_identity(card))
 
 
 def _normalize_discovery_gender(value: object) -> str:
@@ -804,7 +898,8 @@ def character_avatar_prompt(
         return " ".join(str(value or "").split()).strip()[:limit]
 
     name = compact(data.get("name"), 40) or "未命名角色"
-    description = compact(data.get("description"), 700)
+    identity = read_visual_identity(card)
+    description = identity.description or compact(data.get("description"), 700)
     personality = compact(data.get("personality"), 400)
     scenario = compact(data.get("scenario"), 400)
     raw_tags = data.get("tags", [])
@@ -829,7 +924,8 @@ def character_avatar_prompt(
         "五官清晰，神态符合性格，服装与职业和世界观一致；主体严格位于中央，头部完整，"
         "四周留出正方形裁切安全区，背景简洁且能轻微暗示角色生活。精致现代数字插画，"
         "色彩协调，适合作为聊天联系人头像。不得出现其他人物、未成年人、真人肖像、"
-        "文字、签名、Logo、水印、边框、聊天界面或气泡。"
+        "文字、签名、Logo、水印、边框、聊天界面或气泡。\n"
+        f"稳定视觉负面约束：{identity.negative_prompt}"
     )
 
 
@@ -869,6 +965,7 @@ def autonomous_image_request(
     answer: str,
     *,
     current_time: datetime | None = None,
+    role_state: dict | None = None,
 ) -> str:
     """为独立决策调用整理少量角色信息和最近上下文。"""
 
@@ -876,8 +973,8 @@ def autonomous_image_request(
     if not isinstance(data, dict):
         data = {}
     character_parts = []
+    identity = read_visual_identity(card)
     for label, key in (
-        ("角色描述", "description"),
         ("性格", "personality"),
         ("当前场景", "scenario"),
     ):
@@ -893,13 +990,24 @@ def autonomous_image_request(
             recent.append(f"{role}：{content[:600]}")
 
     context = "\n".join(recent) or "（暂无更早对话）"
+    if identity.description:
+        character_parts.insert(0, f"稳定视觉身份：{identity.description}")
+    if identity.default_outfit:
+        character_parts.append(f"默认服装：{identity.default_outfit}")
+    character_parts.append(f"视觉负面约束：{identity.negative_prompt}")
     profile = "\n".join(character_parts) or "（遵循角色当前设定）"
+    scene = build_scene_context(
+        role_state,
+        recent_event=answer,
+        current_time=current_time,
+    )
     return (
         f"角色名：{character_name}\n"
         f"{profile}\n\n"
         f"最近对话：\n{context}\n\n"
         f"刚刚发送的角色消息：\n{answer.strip()[:1_500]}\n\n"
         f"当前图片时间场景：{image_time_scene_prompt(current_time)}。\n\n"
+        f"本轮共享场景事实：{scene_context_prompt(scene)}。\n\n"
         "判断角色是否会在此刻自主附带一张图片，并按指定 JSON 格式输出。"
     )
 

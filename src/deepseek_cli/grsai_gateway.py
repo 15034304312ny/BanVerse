@@ -78,7 +78,7 @@ class GrsAiGateway:
         self._endpoint = f"{normalize_grsai_base_url(base_url)}/chat/completions"
         self._model = model.strip() or DEFAULT_GRSAI_TEXT_MODEL
         self._opener = opener
-        self._timeout = max(10, int(timeout))
+        self._timeout = max(1, int(timeout))
 
     def stream_chat(
         self,
@@ -87,6 +87,10 @@ class GrsAiGateway:
         *,
         system_prompt: str = "",
         temperature: float | None = None,
+        top_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        repetition_penalty: float | None = None,
     ) -> Iterable[StreamDelta]:
         payload_messages: list[dict[str, str]] = []
         if system_prompt.strip():
@@ -104,6 +108,10 @@ class GrsAiGateway:
         }
         if temperature is not None:
             payload["temperature"] = max(0.0, min(float(temperature), 2.0))
+        if top_p is not None:
+            payload["top_p"] = max(0.0, min(float(top_p), 1.0))
+        # Unknown/undeclared penalty fields are deliberately omitted.
+        _ = (frequency_penalty, presence_penalty, repetition_penalty)
         request = Request(
             self._endpoint,
             data=json.dumps(

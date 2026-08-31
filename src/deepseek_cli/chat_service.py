@@ -48,6 +48,10 @@ class ChatStreamService:
         example_messages: Sequence[Message] = (),
         post_history_prompt: str = "",
         temperature: float | None = None,
+        top_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        repetition_penalty: float | None = None,
     ) -> Iterable[ChatEvent]:
         resolved_model = resolve_model(model)
         if resolved_model is None:
@@ -77,6 +81,20 @@ class ChatStreamService:
             if temperature is not None:
                 options["temperature"] = max(
                     0.0, min(float(temperature), 2.0)
+                )
+            if top_p is not None:
+                options["top_p"] = max(0.0, min(float(top_p), 1.0))
+            if frequency_penalty is not None:
+                options["frequency_penalty"] = max(
+                    -2.0, min(float(frequency_penalty), 2.0)
+                )
+            if presence_penalty is not None:
+                options["presence_penalty"] = max(
+                    -2.0, min(float(presence_penalty), 2.0)
+                )
+            if repetition_penalty is not None:
+                options["repetition_penalty"] = max(
+                    0.0, min(float(repetition_penalty), 2.0)
                 )
             stream = gateway.stream_chat(
                 resolved_model, request_messages, **options
