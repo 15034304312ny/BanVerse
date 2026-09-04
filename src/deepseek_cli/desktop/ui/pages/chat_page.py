@@ -20,6 +20,7 @@ from ...ai_features import deserialize_reply_segments
 from ...data.repositories import Conversation, Turn
 from ...platform import is_android_platform
 from ..mobile import enable_touch_scrolling
+from ..widgets.avatar_widget import AvatarWidget
 from ..widgets.chat_composer import ChatComposer
 from ..widgets.message_bubble import MessageBubble
 
@@ -100,23 +101,41 @@ class ChatPage(QWidget):
             8 if self._mobile else 10,
         )
         header_layout.setSpacing(6 if self._mobile else 8)
+        self.header_avatar = AvatarWidget(40, header)
+        self.header_avatar.set_avatar("伴界")
+        self.header_avatar.setVisible(not self._mobile)
         self.title = QLabel("选择或新建一个对话")
         self.title.setObjectName("pageTitle")
+        self.subtitle = QLabel("让每一次对话都有温度")
+        self.subtitle.setObjectName("pageSubtitle")
+        self.subtitle.setVisible(not self._mobile)
+        title_block = QVBoxLayout()
+        title_block.setContentsMargins(0, 0, 0, 0)
+        title_block.setSpacing(1)
+        title_block.addWidget(self.title)
+        title_block.addWidget(self.subtitle)
         self.model_combo = QComboBox()
+        self.model_combo.setObjectName("modelSelector")
         self.model_combo.setAccessibleName("当前会话模型")
         self.model_combo.setMinimumHeight(44 if self._mobile else 42)
+        if not self._mobile:
+            self.model_combo.setMinimumWidth(210)
+            self.model_combo.setMaximumWidth(290)
         for model in MODELS:
             self.model_combo.addItem(model.label, model.id)
         self.model_combo.currentIndexChanged.connect(self._model_selected)
         self.edit_button = QPushButton("编辑")
+        self.edit_button.setObjectName("headerActionButton")
         self.edit_button.setAccessibleName("编辑当前会话名称、头像和角色")
         self.edit_button.setMinimumHeight(44 if self._mobile else 42)
         self.edit_button.clicked.connect(self.edit_requested)
         self.memory_button = QPushButton("记忆")
+        self.memory_button.setObjectName("headerActionButton")
         self.memory_button.setAccessibleName("管理当前会话记忆")
         self.memory_button.setMinimumHeight(44 if self._mobile else 42)
         self.memory_button.clicked.connect(self.memory_requested)
         self.delete_button = QPushButton("删除")
+        self.delete_button.setObjectName("dangerButton")
         self.delete_button.setAccessibleName("删除当前会话")
         self.delete_button.setMinimumHeight(44 if self._mobile else 42)
         self.delete_button.clicked.connect(self.delete_requested)
@@ -124,7 +143,7 @@ class ChatPage(QWidget):
             title_row = QHBoxLayout()
             title_row.setContentsMargins(0, 0, 0, 0)
             title_row.setSpacing(6)
-            title_row.addWidget(self.title)
+            title_row.addLayout(title_block)
             title_row.addStretch(1)
             title_row.addWidget(self.memory_button)
             title_row.addWidget(self.edit_button)
@@ -132,7 +151,8 @@ class ChatPage(QWidget):
             header_layout.addLayout(title_row)
             header_layout.addWidget(self.model_combo)
         else:
-            header_layout.addWidget(self.title)
+            header_layout.addWidget(self.header_avatar)
+            header_layout.addLayout(title_block)
             header_layout.addStretch(1)
             header_layout.addWidget(self.model_combo)
             header_layout.addWidget(self.memory_button)
@@ -242,7 +262,16 @@ class ChatPage(QWidget):
         """
 
         self._conversation = conversation
-        self.title.setText(conversation.title)
+        self.title.setText(conversation.display_name)
+        self.subtitle.setText(
+            conversation.title
+            if conversation.title != conversation.display_name
+            else "AI 角色对话"
+        )
+        self.header_avatar.set_avatar(
+            conversation.display_name,
+            conversation.effective_avatar_path,
+        )
         self.model_combo.blockSignals(True)
         index = self.model_combo.findData(conversation.model)
         if index >= 0:

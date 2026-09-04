@@ -43,10 +43,12 @@ class ChatComposer(QFrame):
         root.setSpacing(8)
 
         self.attachment_row = QFrame()
+        self.attachment_row.setObjectName("attachmentCard")
         attachment_layout = QHBoxLayout(self.attachment_row)
         attachment_layout.setContentsMargins(0, 0, 0, 0)
         attachment_layout.setSpacing(8)
         self.attachment_preview = QLabel()
+        self.attachment_preview.setObjectName("attachmentPreview")
         self.attachment_preview.setFixedSize(56, 56)
         self.attachment_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         attachment_layout.addWidget(self.attachment_preview)
@@ -55,6 +57,7 @@ class ChatComposer(QFrame):
         attachment_layout.addWidget(self.attachment_name)
         attachment_layout.addStretch(1)
         remove = QPushButton("移除")
+        remove.setObjectName("quietButton")
         remove.setAccessibleName("移除待发送图片")
         remove.clicked.connect(self.clear_attachment)
         attachment_layout.addWidget(remove)
@@ -62,16 +65,19 @@ class ChatComposer(QFrame):
         self.attachment_row.hide()
 
         self.attach_button = QPushButton("图片")
+        self.attach_button.setObjectName("composerToolButton")
         self.attach_button.setAccessibleName("选择要发送的图片")
         self.attach_button.setMinimumSize(64 if self._mobile else 62, 44)
         self.attach_button.clicked.connect(self._choose_attachment)
         self.sticker_button = QPushButton("表情")
+        self.sticker_button.setObjectName("composerToolButton")
         self.sticker_button.setAccessibleName("打开表情包")
         self.sticker_button.setToolTip("选择并直接发送表情")
         self.sticker_button.setMinimumSize(64 if self._mobile else 62, 44)
         self.sticker_button.clicked.connect(self._choose_sticker)
 
         self.editor = QTextEdit()
+        self.editor.setObjectName("messageEditor")
         self.editor.setPlaceholderText(
             "输入消息…"
             if self._mobile

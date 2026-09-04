@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSignalBlocker, QSize, Signal
+from PySide6.QtCore import QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -26,6 +26,7 @@ class ConversationRow(QWidget):
 
     def __init__(self, conversation: Conversation) -> None:
         super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setMinimumHeight(self.MINIMUM_HEIGHT)
         self.setAccessibleName(
             f"与{conversation.display_name}的对话，{self._summary_text(conversation)}"
@@ -86,7 +87,7 @@ class ConversationsPage(QWidget):
     def __init__(self, repository: ChatRepository) -> None:
         super().__init__()
         self.setObjectName("sidebar")
-        self.setFixedWidth(292)
+        self.setFixedWidth(304)
         self._repository = repository
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 14, 12, 0)
@@ -97,16 +98,19 @@ class ConversationsPage(QWidget):
         header.addWidget(title)
         header.addStretch(1)
         new_button = QPushButton("新建")
+        new_button.setObjectName("primaryButton")
         new_button.setMinimumHeight(40)
         new_button.clicked.connect(self.new_requested)
         header.addWidget(new_button)
         layout.addLayout(header)
         self.search = QLineEdit()
+        self.search.setObjectName("searchInput")
         self.search.setPlaceholderText("搜索会话")
         self.search.setMinimumHeight(42)
         self.search.textChanged.connect(self.refresh)
         layout.addWidget(self.search)
         self.list = QListWidget()
+        self.list.setObjectName("conversationList")
         self.list.setAccessibleName("会话列表")
         enable_touch_scrolling(self.list)
         self.list.currentItemChanged.connect(self._selected)

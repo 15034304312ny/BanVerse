@@ -125,7 +125,7 @@ class CharactersPage(QWidget):
         settings: SettingsRepository | None = None,
     ) -> None:
         super().__init__()
-        self.setObjectName("settingsPage")
+        self.setObjectName("charactersPage")
         self._repository = repository
         self._builtins = builtins
         self._settings = settings
@@ -150,6 +150,8 @@ class CharactersPage(QWidget):
             ("开始聊天", self._start_chat),
         ):
             button = QPushButton(label)
+            if label == "开始聊天":
+                button.setObjectName("primaryButton")
             button.setMinimumHeight(42)
             button.clicked.connect(handler)
             header.addWidget(button)
@@ -170,6 +172,9 @@ class CharactersPage(QWidget):
         )
         for index, (label, handler) in enumerate(action_specs):
             button = QPushButton(label)
+            button.setObjectName(
+                "dangerButton" if label == "删除" else "quietButton"
+            )
             button.setMinimumHeight(42)
             button.clicked.connect(handler)
             actions.addWidget(button, 1 if self._mobile else 0)
@@ -187,11 +192,13 @@ class CharactersPage(QWidget):
         layout.addLayout(actions)
 
         self.search = QLineEdit()
+        self.search.setObjectName("searchInput")
         self.search.setPlaceholderText("搜索角色")
         self.search.setMinimumHeight(42)
         self.search.textChanged.connect(self.refresh)
         layout.addWidget(self.search)
         self.list = QListWidget()
+        self.list.setObjectName("characterList")
         self.list.setAccessibleName("角色列表")
         enable_touch_scrolling(self.list)
         self.list.itemDoubleClicked.connect(lambda _item: self._edit())

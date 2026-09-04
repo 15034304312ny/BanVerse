@@ -67,10 +67,15 @@ class MessageBubble(QWidget):
             row.addStretch(1)
 
         self.bubble = QFrame()
-        self.bubble.setObjectName(
-            "errorBubble" if status in {"failed", "cancelled", "interrupted"}
-            else ("userBubble" if role == "user" else "assistantBubble")
-        )
+        if status in {"failed", "cancelled", "interrupted"}:
+            bubble_style = "errorBubble"
+        elif role == "user":
+            bubble_style = "userBubble"
+        elif narration or typing:
+            bubble_style = "narrationBubble"
+        else:
+            bubble_style = "assistantBubble"
+        self.bubble.setObjectName(bubble_style)
         self.bubble.setMaximumWidth(680)
         self.bubble.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
@@ -81,6 +86,7 @@ class MessageBubble(QWidget):
 
         if reasoning:
             self._reasoning_button = QPushButton("查看思考过程")
+            self._reasoning_button.setObjectName("messageActionButton")
             self._reasoning_button.setCheckable(True)
             self._reasoning_button.setAccessibleName("展开或收起思考过程")
             self._reasoning_button.toggled.connect(self._toggle_reasoning)
@@ -136,6 +142,7 @@ class MessageBubble(QWidget):
                 self.image_label.setAccessibleName("聊天图片预览")
             body.addWidget(self.image_label)
             open_image = QPushButton("打开原图")
+            open_image.setObjectName("messageActionButton")
             open_image.setAccessibleName("使用系统应用打开原图")
             open_image.clicked.connect(self._open_image)
             body.addWidget(open_image, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -185,6 +192,7 @@ class MessageBubble(QWidget):
             and retry_enabled
         ):
             retry = QPushButton("重试")
+            retry.setObjectName("messageActionButton")
             retry.setAccessibleName("重新发送这条消息")
             retry.clicked.connect(
                 lambda: self.retry_requested.emit(retry_text or self._text)
@@ -200,6 +208,7 @@ class MessageBubble(QWidget):
             and message_key
         ):
             self.speech_button = QPushButton("播放")
+            self.speech_button.setObjectName("messageActionButton")
             self.speech_button.setMinimumHeight(44)
             self.speech_button.setAccessibleName("播放这条 AI 回复")
             self.speech_button.clicked.connect(self._speech_action)
@@ -307,6 +316,7 @@ class MessageBubble(QWidget):
         if self._reasoning_label is None:
             layout = self.findChild(QFrame).layout()
             self._reasoning_button = QPushButton("查看思考过程")
+            self._reasoning_button.setObjectName("messageActionButton")
             self._reasoning_button.setCheckable(True)
             self._reasoning_button.setAccessibleName("展开或收起思考过程")
             self._reasoning_button.toggled.connect(self._toggle_reasoning)
