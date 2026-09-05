@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QScrollArea,
     QScroller,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -19,10 +21,12 @@ from ....model_catalog import MODELS, ModelInfo
 from ...ai_features import deserialize_reply_segments
 from ...data.repositories import Conversation, Turn
 from ...platform import is_android_platform
+from ..icons import line_icon
 from ..mobile import enable_touch_scrolling
 from ..widgets.avatar_widget import AvatarWidget
 from ..widgets.chat_composer import ChatComposer
 from ..widgets.message_bubble import MessageBubble
+from ..widgets.model_selector import ModelSelector
 
 _ERROR_MESSAGES = {
     "authentication": "API Key 无效，请前往设置检查。",
@@ -57,6 +61,7 @@ _ERROR_MESSAGES = {
 
 
 class ChatPage(QWidget):
+    back_requested = Signal()
     send_requested = Signal(str, str)
     sticker_requested = Signal(str)
     stop_requested = Signal()
@@ -90,77 +95,99 @@ class ChatPage(QWidget):
 
         header = QFrame()
         header.setObjectName("header")
-        header.setMinimumHeight(112 if self._mobile else 68)
-        header_layout = (
-            QVBoxLayout(header) if self._mobile else QHBoxLayout(header)
+        header.setMinimumHeight(68 if self._mobile else 72)
+        header_body = QVBoxLayout(header)
+        header_body.setContentsMargins(
+            8 if self._mobile else 20,
+            8,
+            8 if self._mobile else 14,
+            8,
         )
-        header_layout.setContentsMargins(
-            12 if self._mobile else 20,
-            8 if self._mobile else 10,
-            12 if self._mobile else 16,
-            8 if self._mobile else 10,
-        )
+        header_body.setSpacing(6)
+        header_layout = QHBoxLayout()
         header_layout.setSpacing(6 if self._mobile else 8)
-        self.header_avatar = AvatarWidget(40, header)
+        header_body.addLayout(header_layout)
+        self.back_button = QPushButton()
+        self.back_button.setObjectName("headerBackButton")
+        self.back_button.setIcon(line_icon("back"))
+        self.back_button.setIconSize(QSize(24, 24))
+        self.back_button.setFixedSize(44, 44)
+        self.back_button.setAccessibleName("返回消息列表")
+        self.back_button.setToolTip("返回消息列表")
+        self.back_button.setVisible(self._mobile)
+        self.back_button.clicked.connect(self.back_requested)
+        if self._mobile:
+            header_layout.addWidget(self.back_button)
+        self.header_avatar = AvatarWidget(42 if self._mobile else 40, header)
         self.header_avatar.set_avatar("伴界")
-        self.header_avatar.setVisible(not self._mobile)
+        header_layout.addWidget(self.header_avatar)
         self.title = QLabel("选择或新建一个对话")
         self.title.setObjectName("pageTitle")
+        self.title.setMinimumWidth(0)
+        self.title.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self.subtitle = QLabel("让每一次对话都有温度")
         self.subtitle.setObjectName("pageSubtitle")
-        self.subtitle.setVisible(not self._mobile)
+        self.subtitle.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         title_block = QVBoxLayout()
         title_block.setContentsMargins(0, 0, 0, 0)
         title_block.setSpacing(1)
         title_block.addWidget(self.title)
         title_block.addWidget(self.subtitle)
-        self.model_combo = QComboBox()
+        self.model_combo = ModelSelector()
         self.model_combo.setObjectName("modelSelector")
         self.model_combo.setAccessibleName("当前会话模型")
         self.model_combo.setMinimumHeight(44 if self._mobile else 42)
-        if not self._mobile:
+        if self._mobile:
+            self.model_combo.setMinimumWidth(0)
+            self.model_combo.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
+        else:
             self.model_combo.setMinimumWidth(210)
-            self.model_combo.setMaximumWidth(290)
+            self.model_combo.setMaximumWidth(270)
         for model in MODELS:
             self.model_combo.addItem(model.label, model.id)
         self.model_combo.currentIndexChanged.connect(self._model_selected)
-        self.edit_button = QPushButton("编辑")
-        self.edit_button.setObjectName("headerActionButton")
-        self.edit_button.setAccessibleName("编辑当前会话名称、头像和角色")
-        self.edit_button.setMinimumHeight(44 if self._mobile else 42)
-        self.edit_button.clicked.connect(self.edit_requested)
-        self.memory_button = QPushButton("记忆")
-        self.memory_button.setObjectName("headerActionButton")
-        self.memory_button.setAccessibleName("管理当前会话记忆")
-        self.memory_button.setMinimumHeight(44 if self._mobile else 42)
-        self.memory_button.clicked.connect(self.memory_requested)
-        self.delete_button = QPushButton("删除")
-        self.delete_button.setObjectName("dangerButton")
-        self.delete_button.setAccessibleName("删除当前会话")
-        self.delete_button.setMinimumHeight(44 if self._mobile else 42)
-        self.delete_button.clicked.connect(self.delete_requested)
+        self.model_combo.currentIndexChanged.connect(self._update_model_hint)
+        self.memory_action = QAction("管理角色记忆", self)
+        self.memory_action.triggered.connect(
+            lambda _checked=False: self.memory_requested.emit()
+        )
+        self.edit_action = QAction("编辑当前会话", self)
+        self.edit_action.triggered.connect(
+            lambda _checked=False: self.edit_requested.emit()
+        )
+        self.delete_action = QAction("删除当前会话", self)
+        self.delete_action.triggered.connect(
+            lambda _checked=False: self.delete_requested.emit()
+        )
+        self.more_menu = QMenu(self)
+        self.more_menu.addAction(self.memory_action)
+        self.more_menu.addAction(self.edit_action)
+        self.more_menu.addSeparator()
+        self.more_menu.addAction(self.delete_action)
+        self.more_button = QPushButton()
+        self.more_button.setObjectName("headerMenuButton")
+        self.more_button.setIcon(line_icon("more"))
+        self.more_button.setIconSize(QSize(24, 24))
+        self.more_button.setFixedSize(44, 44)
+        self.more_button.setAccessibleName("更多会话操作")
+        self.more_button.setToolTip("更多会话操作")
+        self.more_button.setMenu(self.more_menu)
+        header_layout.addLayout(title_block, 1)
+        if not self._mobile:
+            header_layout.addWidget(self.model_combo)
+        header_layout.addWidget(self.more_button)
         if self._mobile:
-            title_row = QHBoxLayout()
-            title_row.setContentsMargins(0, 0, 0, 0)
-            title_row.setSpacing(6)
-            title_row.addLayout(title_block)
-            title_row.addStretch(1)
-            title_row.addWidget(self.memory_button)
-            title_row.addWidget(self.edit_button)
-            title_row.addWidget(self.delete_button)
-            header_layout.addLayout(title_row)
-            header_layout.addWidget(self.model_combo)
-        else:
-            header_layout.addWidget(self.header_avatar)
-            header_layout.addLayout(title_block)
-            header_layout.addStretch(1)
-            header_layout.addWidget(self.model_combo)
-            header_layout.addWidget(self.memory_button)
-            header_layout.addWidget(self.edit_button)
-            header_layout.addWidget(self.delete_button)
+            header_body.addWidget(self.model_combo)
         layout.addWidget(header)
 
         self.scroll = QScrollArea()
+        self.scroll.setObjectName("messageScroll")
         # widgetResizable 的自动 resize 在 Android 上偶尔不把内容 widget 收缩
         # 到真实内容高度，导致最下方残留可滚动的"幽灵空白"：滚动条被撑大，
         # 钉底后视口里只有空白，最新气泡被顶到视口之外。改由 _relayout_messages
@@ -237,12 +264,19 @@ class ChatPage(QWidget):
         self.model_combo.setCurrentIndex(index if index >= 0 else 0)
         self.model_combo.blockSignals(False)
         self._model_options_editable = len(models) > 1
-        self.model_combo.setToolTip(
-            "选择当前会话使用的 DeepSeek 实际模型。"
+        self._update_model_hint()
+        self._update_model_combo_enabled()
+
+    def _update_model_hint(self, *_args) -> None:
+        hint = (
+            "选择当前会话使用的模型。"
             if self._model_options_editable
             else "当前模型由所选文本平台的设置决定。"
         )
-        self._update_model_combo_enabled()
+        self.model_combo.setToolTip(
+            f"{self.model_combo.currentText()}\n{hint}"
+        )
+        self.model_combo.setAccessibleDescription(self.model_combo.currentText())
 
     @property
     def conversation_id(self) -> str | None:
@@ -263,6 +297,7 @@ class ChatPage(QWidget):
 
         self._conversation = conversation
         self.title.setText(conversation.display_name)
+        self.title.setToolTip(conversation.display_name)
         self.subtitle.setText(
             conversation.title
             if conversation.title != conversation.display_name
@@ -277,6 +312,7 @@ class ChatPage(QWidget):
         if index >= 0:
             self.model_combo.setCurrentIndex(index)
         self.model_combo.blockSignals(False)
+        self._update_model_hint()
         self._clear_messages()
         if conversation.opening_message and not defer_opening:
             self._add_bubble(
@@ -484,16 +520,17 @@ class ChatPage(QWidget):
         self._generating = generating
         self.composer.set_generating(generating)
         self._update_model_combo_enabled()
-        self.edit_button.setEnabled(not generating)
-        self.delete_button.setEnabled(not generating)
+        self.edit_action.setEnabled(not generating and self._available)
+        self.delete_action.setEnabled(not generating and self._available)
 
     def set_available(self, available: bool) -> None:
         self._available = available
         self.composer.set_available(available)
         self._update_model_combo_enabled()
-        self.edit_button.setEnabled(available)
-        self.memory_button.setEnabled(available)
-        self.delete_button.setEnabled(available)
+        self.more_button.setEnabled(available)
+        self.edit_action.setEnabled(available and not self._generating)
+        self.memory_action.setEnabled(available)
+        self.delete_action.setEnabled(available and not self._generating)
 
     def _update_model_combo_enabled(self) -> None:
         self.model_combo.setEnabled(
@@ -510,6 +547,22 @@ class ChatPage(QWidget):
 
     def _add_bubble(self, role: str, text: str, **kwargs) -> MessageBubble:
         image_retry = kwargs.pop("image_retry", None)
+        if "sender_name" not in kwargs:
+            kwargs["sender_name"] = (
+                "我"
+                if role == "user"
+                else (
+                    self._conversation.display_name
+                    if self._conversation is not None
+                    else "伴界角色"
+                )
+            )
+        if (
+            role != "user"
+            and "avatar_path" not in kwargs
+            and self._conversation is not None
+        ):
+            kwargs["avatar_path"] = self._conversation.effective_avatar_path
         bubble = MessageBubble(role, text, **kwargs)
         if image_retry:
             turn_id, event_id = image_retry
@@ -637,8 +690,11 @@ class ChatPage(QWidget):
         # 直接按真实内容底部滚动，不依赖可能滞后的 bar.maximum()
         # （QTBUG-35250：布局激活前 maximum 过时，会把最新气泡顶到
         # 视口之外）；同时记录贴底意图，等 rangeChanged 补滚兜底。
-        if bar.maximum() - bar.value() <= self._BOTTOM_THRESHOLD:
-            self._pin_to_bottom = True
+        # 此方法只由明确需要回到底部的路径调用（打开会话、用户发送、
+        # 点击“最新消息”或原本已贴底时收到新内容），因此持续保留钉底
+        # 意图。头像、姓名和 Markdown 可能让布局分数次更新 range；直到
+        # 用户主动上滑前，每次 rangeChanged 都应继续跟到新的 maximum。
+        self._pin_to_bottom = True
         bar.setValue(self._content_bottom())
 
     def _on_scroll_range_changed(self, _minimum: int, maximum: int) -> None:
@@ -651,9 +707,8 @@ class ChatPage(QWidget):
 
         if not self._pin_to_bottom:
             return
-        self._pin_to_bottom = False
         bar = self.scroll.verticalScrollBar()
-        bar.setValue(self._content_bottom())
+        bar.setValue(maximum)
 
     def _message_bubbles(self) -> list[MessageBubble]:
         """当前可见的消息气泡（按时间顺序，不含顶部伸展占位）。"""

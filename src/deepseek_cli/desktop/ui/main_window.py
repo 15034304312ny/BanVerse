@@ -10,7 +10,7 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, QThread, QTimer
+from PySide6.QtCore import QSize, Qt, QThread, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -99,6 +99,7 @@ from ..security.credentials import CredentialStore
 from ..stickers import sticker_by_id
 from ..theme import stylesheet
 from .conversation_edit_dialog import ConversationEditDialog
+from .icons import navigation_icon
 from .memory_manager_dialog import MemoryManagerDialog
 from .pages.characters_page import CharactersPage
 from .pages.chat_page import ChatPage
@@ -181,15 +182,15 @@ class MainWindow(QMainWindow):
         nav = QWidget()
         nav.setObjectName("navBar")
         if self._mobile:
-            nav.setFixedHeight(68)
+            nav.setFixedHeight(72)
             nav_layout = QHBoxLayout(nav)
-            nav_layout.setContentsMargins(8, 6, 8, 8)
-            nav_layout.setSpacing(6)
+            nav_layout.setContentsMargins(10, 5, 10, 7)
+            nav_layout.setSpacing(8)
         else:
-            nav.setFixedWidth(72)
+            nav.setFixedWidth(80)
             nav_layout = QVBoxLayout(nav)
-            nav_layout.setContentsMargins(8, 16, 8, 16)
-            nav_layout.setSpacing(10)
+            nav_layout.setContentsMargins(10, 18, 10, 16)
+            nav_layout.setSpacing(12)
         brand = QLabel()
         brand.setObjectName("brand")
         brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -203,22 +204,31 @@ class MainWindow(QMainWindow):
         if not self._mobile:
             nav_layout.addWidget(brand)
 
-        self.message_nav = QPushButton("消息")
-        self.character_nav = QPushButton("角色")
-        self.settings_nav = QPushButton("设置")
-        for button in (
-            self.message_nav,
-            self.character_nav,
-            self.settings_nav,
-        ):
+        nav_specs = (
+            ("消息", "messages", "打开消息列表"),
+            ("角色", "characters", "打开角色列表"),
+            ("设置", "settings", "打开设置"),
+        )
+        nav_buttons: list[QToolButton] = []
+        for label, icon_name, accessible_name in nav_specs:
+            button = QToolButton()
+            button.setText(label)
+            button.setIcon(navigation_icon(icon_name))
+            button.setIconSize(QSize(23, 23))
+            button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextUnderIcon
+            )
+            button.setAccessibleName(accessible_name)
             button.setObjectName("navButton")
             button.setCheckable(True)
             if self._mobile:
-                button.setMinimumHeight(48)
+                button.setMinimumHeight(54)
                 nav_layout.addWidget(button, 1)
             else:
-                button.setMinimumSize(52, 52)
+                button.setMinimumSize(58, 58)
                 nav_layout.addWidget(button)
+            nav_buttons.append(button)
+        self.message_nav, self.character_nav, self.settings_nav = nav_buttons
         if not self._mobile:
             nav_layout.addStretch(1)
         group = QButtonGroup(self)
@@ -271,6 +281,8 @@ class MainWindow(QMainWindow):
         self.characters_page.changed.connect(self._characters_changed)
         self.characters_page.policy_changed.connect(self._proactive.reload)
         self.chat_page.send_requested.connect(self._send)
+        if self._mobile:
+            self.chat_page.back_requested.connect(self._show_messages)
         self.chat_page.sticker_requested.connect(self._send_sticker)
         self.chat_page.stop_requested.connect(self._stop)
         self.chat_page.retry_requested.connect(self._send)

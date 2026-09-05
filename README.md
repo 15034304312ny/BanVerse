@@ -234,6 +234,8 @@ bash packaging/android/build_android_release.sh
 
 ## 项目结构
 
+界面布局、主题令牌与双端验收约定见 [界面设计规范](docs/ui-design.md)。
+
 ```text
 src/deepseek_cli/             CLI、模型网关与桌面/Android 应用
   desktop/                    UI、数据库、角色、图片、TTS 与后台任务
@@ -253,6 +255,15 @@ packaging/                    Windows、PyInstaller、Inno Setup 构建脚本
 packaging/android/            Android 构建、Java 桥接与真机测试工具
 .github/workflows/ci.yml      GitHub Actions 持续集成
 ```
+
+## 1.6.2 更新
+
+- 采用即时通讯风格的桌面三栏布局与手机底部导航，统一深浅色主题和线性图标。
+- 消息显示头像与发送者姓名，气泡按内容收缩；输入区整合附件、表情和发送操作。
+- 聊天和角色页的低频操作归入“更多”菜单，手机头部保留明确的返回入口。
+- 模型栏显示实际调用模型，修复窄屏截断及 GRS AI 内部兼容别名的显示混淆。
+- 图片预览随气泡宽度缩放，避免窄窗口裁剪；保留现有对话、图片、TTS 与同步逻辑。
+- 复用既有 Windows 自签身份及 Android release key，支持保留数据覆盖升级。
 
 ## 1.6.1 更新
 

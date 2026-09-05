@@ -2,25 +2,34 @@
 
 from __future__ import annotations
 
-from .tokens import DARK, LIGHT
+from .tokens import DARK, LIGHT, METRICS
 
 
 def stylesheet(dark: bool = False, mobile: bool = False) -> str:
     c = DARK if dark else LIGHT
+    m = METRICS
     mobile_rules = ""
     if mobile:
         mobile_rules = """
         * { font-size: 15px; }
-        QPushButton { min-height: 44px; padding: 3px 11px; }
+        QPushButton, QToolButton { min-height: 44px; padding: 3px 10px; }
         QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox,
         QDoubleSpinBox, QDateEdit, QTimeEdit { min-height: 44px; }
         QGroupBox { margin-top: 12px; padding: 12px; padding-top: 18px; }
         QGroupBox::title { left: 12px; }
         QTabBar::tab { min-height: 44px; padding: 4px 14px; }
         QDialogButtonBox QPushButton { min-width: 88px; }
-        QLabel#pageTitle { font-size: 20px; }
+        QLabel#pageTitle { font-size: 18px; }
         QFrame#assistantBubble, QFrame#userBubble, QFrame#errorBubble,
-        QFrame#narrationBubble { border-radius: 14px; }
+        QFrame#narrationBubble { border-radius: 12px; }
+        QPushButton#messageActionButton { min-height: 44px; }
+        QToolButton#navButton { min-height: 54px; padding: 3px 8px; }
+        QFrame#composerShell { border-radius: 18px; }
+        QMenu::item { padding: 14px 24px 14px 12px; }
+        QComboBox#modelSelector {
+            min-height: 32px; max-height: 32px;
+            padding: 5px 12px; padding-right: 28px;
+        }
         """
     return f"""
     * {{
@@ -35,7 +44,8 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
         background: {c["sidebar"]};
         border-right: 1px solid {c["border"]};
     }}
-    QWidget#chatPage, QWidget#settingsPage, QWidget#charactersPage {{
+    QWidget#chatPage {{ background: {c["message_area"]}; }}
+    QWidget#settingsPage, QWidget#charactersPage {{
         background: {c["surface_alt"]};
     }}
     QLabel {{ color: {c["text"]}; }}
@@ -45,10 +55,12 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
         color: {c["text"]}; font-size: 21px; font-weight: 700;
     }}
     QLabel#pageSubtitle {{ color: {c["text_muted"]}; font-size: 12px; }}
+    QLabel#presenceText {{ color: {c["online"]}; font-size: 12px; }}
 
     QPushButton {{
         min-height: 38px; padding: 3px 14px;
-        border: 1px solid {c["border_strong"]}; border-radius: 10px;
+        border: 1px solid {c["border_strong"]};
+        border-radius: {m["radius_md"]}px;
         background: {c["surface"]}; color: {c["text"]}; font-weight: 500;
     }}
     QPushButton:hover {{
@@ -90,29 +102,55 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
         color: {c["accent_text"]}; background: {c["primary_soft"]};
         border-color: {c["primary_soft"]};
     }}
+    QPushButton#messageActionButton {{
+        min-height: 28px; padding: 0 4px; border-radius: 6px;
+        text-align: left; font-size: 13px;
+    }}
     QPushButton#composerToolButton {{
-        color: {c["text_muted"]}; background: {c["surface_alt"]};
-        border-color: {c["border"]};
+        min-width: 44px; max-width: 44px;
+        min-height: 44px; max-height: 44px;
+        color: {c["text_muted"]}; background: transparent;
+        border-color: transparent; border-radius: 20px;
+        font-size: 21px; padding: 0;
     }}
     QPushButton#composerToolButton:hover {{
         color: {c["accent_text"]}; background: {c["primary_soft"]};
         border-color: {c["primary"]};
     }}
-    QPushButton#navButton {{
-        min-width: 52px; min-height: 52px; padding: 4px; border: none;
-        border-radius: 12px; background: transparent; color: {c["nav_text"]};
+    QPushButton#navButton, QToolButton#navButton {{
+        min-width: 54px; min-height: 54px; padding: 4px; border: none;
+        border-radius: 13px; background: transparent; color: {c["nav_text"]};
         font-weight: 600;
     }}
-    QPushButton#navButton:hover {{ background: {c["nav_hover"]}; color: white; }}
-    QPushButton#navButton:checked {{
-        background: {c["primary"]}; color: {c["primary_text"]};
+    QPushButton#navButton:hover, QToolButton#navButton:hover {{
+        background: {c["nav_hover"]}; color: white;
     }}
+    QPushButton#navButton:checked, QToolButton#navButton:checked {{
+        background: {c["nav_selected"]}; color: {c["primary_text"]};
+    }}
+    QPushButton#headerBackButton, QPushButton#headerMenuButton {{
+        min-width: 44px; max-width: 44px; min-height: 44px; max-height: 44px;
+        padding: 0; border: none; border-radius: 22px;
+        background: transparent; color: {c["text"]}; font-size: 24px;
+    }}
+    QPushButton#headerBackButton:hover, QPushButton#headerMenuButton:hover {{
+        background: {c["surface_hover"]}; color: {c["accent_text"]};
+    }}
+    QPushButton#headerMenuButton::menu-indicator {{ image: none; }}
     QPushButton#newMessageButton {{
         background: {c["primary"]}; color: {c["primary_text"]}; border: none;
         border-radius: 18px; padding: 6px 16px; font-weight: 700;
     }}
     QPushButton#newMessageButton:hover {{ background: {c["primary_hover"]}; }}
     QPushButton#newMessageButton:pressed {{ background: {c["primary_pressed"]}; }}
+    QPushButton#newConversationButton {{
+        min-height: 36px; padding: 2px 12px; border: none;
+        border-radius: 18px; color: {c["accent_text"]};
+        background: {c["primary_soft"]}; font-weight: 700;
+    }}
+    QPushButton#newConversationButton:hover {{
+        color: {c["primary_text"]}; background: {c["primary"]};
+    }}
     QPushButton#stickerButton {{
         font-family: "Segoe UI Emoji"; font-size: 24px; padding: 0;
         border-radius: 12px; background: {c["surface_alt"]};
@@ -138,17 +176,23 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
         border-color: {c["border"]};
     }}
     QLineEdit#searchInput {{
+        background: {c["surface_sunken"]}; border-color: transparent;
+        padding-left: 14px; border-radius: 18px;
+    }}
+    QLineEdit#searchInput:hover {{
         background: {c["surface"]}; border-color: {c["border"]};
-        padding-left: 13px;
     }}
     QTextEdit#messageEditor {{
-        border-radius: 13px; padding: 10px 12px;
-        background: {c["surface_alt"]};
+        border: none; border-radius: 14px; padding: 9px 10px;
+        background: transparent;
+    }}
+    QTextEdit#messageEditor:hover, QTextEdit#messageEditor:focus {{
+        border: none; background: transparent;
     }}
     QComboBox {{ padding-right: 28px; }}
     QComboBox#modelSelector {{
         color: {c["accent_text"]}; background: {c["primary_soft"]};
-        border-color: {c["primary_soft"]}; font-weight: 600;
+        border-color: transparent; border-radius: 18px; font-weight: 600;
     }}
     QComboBox#modelSelector:hover, QComboBox#modelSelector:focus {{
         border-color: {c["primary"]};
@@ -167,8 +211,8 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
         background: {c["sidebar"]}; border: none; outline: none; color: {c["text"]};
     }}
     QListWidget::item {{
-        min-height: 84px; padding: 0; margin: 3px 0;
-        border: 1px solid transparent; border-radius: 11px;
+        min-height: 84px; padding: 0; margin: 2px 0;
+        border: 1px solid transparent; border-radius: 10px;
     }}
     QListWidget::item:hover {{
         background: {c["surface_hover"]}; border-color: {c["border"]};
@@ -179,6 +223,7 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
     }}
     QLabel#conversationName {{ font-size: 15px; font-weight: 700; }}
     QLabel#conversationPreview {{ font-size: 13px; line-height: 1.45; }}
+    QLabel#conversationTime {{ color: {c["text_subtle"]}; font-size: 11px; }}
     QLabel#characterName {{ font-size: 16px; font-weight: 700; }}
     QLabel#characterDescription {{ font-size: 13px; line-height: 1.4; }}
     QLabel#characterTag {{
@@ -189,6 +234,9 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
         border-radius: 9px; padding: 2px 8px; font-size: 11px; font-weight: 700;
     }}
 
+    QLabel#messageSender {{
+        color: {c["text_muted"]}; font-size: 12px; font-weight: 500;
+    }}
     QLabel#messageText {{ font-size: 14px; line-height: 1.6; }}
     QLabel#messageSticker {{ font-family: "Segoe UI Emoji"; font-size: 38px; }}
     QLabel#messageImage, QLabel#attachmentPreview {{
@@ -199,7 +247,11 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
         background: {c["surface"]}; border-bottom: 1px solid {c["border"]};
     }}
     QFrame#composer {{
-        background: {c["surface"]}; border-top: 1px solid {c["border"]};
+        background: {c["message_area"]}; border-top: 1px solid {c["border"]};
+    }}
+    QFrame#composerShell {{
+        background: {c["surface"]}; border: 1px solid {c["border"]};
+        border-radius: {m["radius_lg"]}px;
     }}
     QFrame#attachmentCard {{
         background: {c["surface_alt"]}; border: 1px solid {c["border"]};
@@ -207,23 +259,29 @@ def stylesheet(dark: bool = False, mobile: bool = False) -> str:
     }}
     QFrame#assistantBubble {{
         background: {c["assistant_bubble"]}; border: 1px solid {c["border"]};
-        border-radius: 14px;
+        border-radius: {m["radius_md"]}px;
     }}
     QFrame#narrationBubble {{
         background: {c["narration_bubble"]}; border: 1px solid {c["border"]};
-        border-radius: 14px;
+        border-radius: {m["radius_md"]}px;
     }}
     QFrame#userBubble {{
         background: {c["user_bubble"]}; border: 1px solid {c["primary_soft"]};
-        border-radius: 14px;
+        border-radius: {m["radius_md"]}px;
     }}
     QFrame#errorBubble {{
         background: {c["danger_soft"]}; border: 1px solid {c["danger"]};
-        border-radius: 14px;
+        border-radius: {m["radius_md"]}px;
     }}
 
     QScrollArea {{ border: none; background: {c["surface_alt"]}; }}
     QScrollArea > QWidget > QWidget {{ background: {c["surface_alt"]}; }}
+    QScrollArea#messageScroll {{
+        border: none; background: {c["message_area"]};
+    }}
+    QScrollArea#messageScroll > QWidget > QWidget {{
+        background: {c["message_area"]};
+    }}
     QGroupBox {{
         background: {c["surface"]}; border: 1px solid {c["border"]};
         border-radius: 13px; margin-top: 14px; padding: 18px;

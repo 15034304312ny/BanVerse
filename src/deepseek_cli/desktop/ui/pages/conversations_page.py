@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -44,10 +46,18 @@ class ConversationRow(QWidget):
         content = QVBoxLayout()
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(4)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
         self.name = QLabel(conversation.display_name)
         self.name.setObjectName("conversationName")
         self.name.setToolTip(conversation.display_name)
-        content.addWidget(self.name)
+        title_row.addWidget(self.name, 1)
+        self.time = QLabel(self._display_time(conversation.updated_at))
+        self.time.setObjectName("conversationTime")
+        self.time.setAlignment(Qt.AlignmentFlag.AlignRight)
+        title_row.addWidget(self.time)
+        content.addLayout(title_row)
 
         full_preview = self._summary_text(conversation)
         normalized = " ".join(full_preview.split())
@@ -78,6 +88,24 @@ class ConversationRow(QWidget):
             return "AI 摘要暂时生成失败"
         return "尚无 AI 回复摘要"
 
+    @staticmethod
+    def _display_time(value: str) -> str:
+        """以即时通讯软件常用的紧凑格式显示会话时间。"""
+
+        try:
+            moment = datetime.fromisoformat(value).astimezone()
+        except (TypeError, ValueError):
+            return ""
+        now = datetime.now().astimezone()
+        days = (now.date() - moment.date()).days
+        if days == 0:
+            return moment.strftime("%H:%M")
+        if days == 1:
+            return "昨天"
+        if moment.year == now.year:
+            return moment.strftime("%m/%d")
+        return moment.strftime("%Y/%m/%d")
+
 
 class ConversationsPage(QWidget):
     conversation_selected = Signal(str)
@@ -87,7 +115,7 @@ class ConversationsPage(QWidget):
     def __init__(self, repository: ChatRepository) -> None:
         super().__init__()
         self.setObjectName("sidebar")
-        self.setFixedWidth(304)
+        self.setFixedWidth(320)
         self._repository = repository
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 14, 12, 0)
@@ -97,8 +125,9 @@ class ConversationsPage(QWidget):
         title.setObjectName("pageTitle")
         header.addWidget(title)
         header.addStretch(1)
-        new_button = QPushButton("新建")
-        new_button.setObjectName("primaryButton")
+        new_button = QPushButton("＋ 新建")
+        new_button.setObjectName("newConversationButton")
+        new_button.setAccessibleName("新建对话")
         new_button.setMinimumHeight(40)
         new_button.clicked.connect(self.new_requested)
         header.addWidget(new_button)

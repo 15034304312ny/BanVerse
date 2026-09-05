@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from PySide6.QtCore import QCoreApplication, QDateTime, QPointF, Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QImage, QScrollEvent
@@ -95,6 +96,15 @@ def test_conversation_row_reports_summary_generation_state(qtbot):
     assert row.preview.text() == "AI 正在生成摘要…"
 
 
+def test_conversation_row_formats_recent_time_like_messenger(qtbot):
+    current = datetime.now().astimezone()
+    row = ConversationRow(conversation(updated_at=current.isoformat()))
+    qtbot.addWidget(row)
+
+    assert row.time.text() == current.strftime("%H:%M")
+    assert row.time.objectName() == "conversationTime"
+
+
 def test_user_bubble_max_width_tracks_half_viewport(qtbot):
     bubble = MessageBubble("user", "短消息")
     qtbot.addWidget(bubble)
@@ -115,11 +125,11 @@ def test_assistant_bubble_uses_readable_responsive_width(qtbot):
     bubble.show()
 
     bubble.set_chat_width(1000)
-    assert bubble.bubble.width() == 729
-    assert bubble.text_label.minimumWidth() == 705
+    assert 180 <= bubble.bubble.width() <= 653
+    assert bubble.text_label.minimumWidth() == bubble.bubble.width() - 24
     bubble.set_chat_width(700)
-    assert bubble.bubble.width() == 501
-    assert bubble.text_label.minimumWidth() == 477
+    assert 180 <= bubble.bubble.width() <= 448
+    assert bubble.text_label.minimumWidth() == bubble.bubble.width() - 24
 
 
 def test_completed_assistant_has_speech_controls(qtbot):
@@ -160,6 +170,46 @@ def test_chat_page_shows_and_removes_typing_indicator(qtbot):
     )
     page.discard_stream()
     assert page._stream_bubble is None
+
+
+def test_chat_page_labels_both_senders_and_shows_avatars(qtbot):
+    page = ChatPage()
+    qtbot.addWidget(page)
+    page.load(conversation(), [])
+
+    page.add_user_message("今天过得怎么样？")
+    user, assistant = page._message_bubbles()
+
+    assert user.sender_label is not None
+    assert user.sender_label.text() == "我"
+    assert user.avatar is not None
+    assert assistant.sender_label is not None
+    assert assistant.sender_label.text() == "谢昭宁"
+    assert assistant.avatar is not None
+
+
+def test_android_chat_header_uses_compact_messenger_actions(
+    monkeypatch, qtbot
+):
+    monkeypatch.setenv("DEEPSEEK_CHAT_PLATFORM", "android")
+    page = ChatPage()
+    qtbot.addWidget(page)
+
+    assert not page.back_button.isHidden()
+    assert not page.back_button.icon().isNull()
+    assert page.header_avatar.width() == 42
+    page.resize(320, 480)
+    page.show()
+    page.layout().activate()
+    assert page.model_combo.width() >= 280
+    assert page.model_combo.geometry().top() > page.more_button.geometry().bottom()
+    assert page.model_combo.display_text() == "deepseek-v4-flash"
+    assert not page.more_button.icon().isNull()
+    assert [action.text() for action in page.more_menu.actions() if action.text()] == [
+        "管理角色记忆",
+        "编辑当前会话",
+        "删除当前会话",
+    ]
 
 
 def test_chat_page_load_defers_opening(qtbot):
@@ -299,6 +349,8 @@ def test_chat_page_model_selector_tracks_actual_provider_model(qtbot):
         text_provider_models("grsai", "gemini-3.1-pro")
     )
     assert page.model_combo.currentText() == "GRS AI · gemini-3.1-pro"
+    assert page.model_combo.display_text() == "gemini-3.1-pro"
+    assert "gemini-3.1-pro" in page.model_combo.toolTip()
     assert not page.model_combo.isEnabled()
 
     page.set_model_options(text_provider_models("deepseek"))
@@ -371,6 +423,9 @@ def test_message_bubble_renders_local_image_preview(tmp_path, qtbot):
     assert bubble.image_label.pixmap() is not None
     assert not bubble.image_label.pixmap().isNull()
     assert bubble.bubble.width() <= 480
+    for width in (500, 1000):
+        bubble.set_chat_width(width)
+        assert bubble.image_label.pixmap().width() <= bubble.bubble.width() - 24
 
 
 def test_sticker_picker_and_message_bubble_render_builtin_sticker(qtbot):
@@ -982,8 +1037,9 @@ def test_composer_has_no_manual_image_generation_entry(qtbot):
     assert "ImageGen" not in {
         button.text() for button in composer.findChildren(QPushButton)
     }
-    assert composer.attach_button.text() == "图片"
-    assert composer.sticker_button.text() == "表情"
+    assert composer.attach_button.icon().isNull() is False
+    assert composer.attach_button.toolTip() == "发送图片"
+    assert composer.sticker_button.icon().isNull() is False
     assert composer.sticker_button.accessibleName() == "打开表情包"
 
 
@@ -1007,6 +1063,7 @@ def test_android_chat_layout_fits_narrow_viewport(monkeypatch, qtbot):
     host.resize(360, 130)
     layout.activate()
     composer.layout().activate()
+    composer.shell.layout().activate()
     QCoreApplication.processEvents()
 
     assert assistant.bubble.width() <= 336
@@ -1014,8 +1071,8 @@ def test_android_chat_layout_fits_narrow_viewport(monkeypatch, qtbot):
     assert assistant.text_label.maximumWidth() <= 312
     assert user.text_label.maximumWidth() <= 312
     assert composer.width() == 360
-    assert composer.editor.width() >= 320
-    assert composer.editor.height() == 52
+    assert composer.editor.width() >= 120
+    assert composer.editor.height() == 48
     assert composer.attach_button.height() >= 44
     assert composer.sticker_button.height() >= 44
     assert composer.action.height() >= 44

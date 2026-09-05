@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from ...platform import is_android_platform
 from ...stickers import sticker_by_id
+from .avatar_widget import AvatarWidget
 
 
 class MessageBubble(QWidget):
@@ -39,6 +40,8 @@ class MessageBubble(QWidget):
         retry_enabled: bool = True,
         narration: bool = False,
         typing: bool = False,
+        sender_name: str = "",
+        avatar_path: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -52,6 +55,7 @@ class MessageBubble(QWidget):
         self._speech_state = "idle"
         self._chat_width = 0
         self._fixed_width = 0
+        self._sender_name = sender_name.strip()
         self._mobile = is_android_platform()
         self._source_pixmap = QPixmap()
 
@@ -65,6 +69,15 @@ class MessageBubble(QWidget):
         row.setSpacing(10)
         if role == "user":
             row.addStretch(1)
+        self.avatar = None
+        if self._sender_name:
+            self.avatar = AvatarWidget(36 if self._mobile else 38)
+            self.avatar.set_avatar(self._sender_name, avatar_path)
+            if role != "user":
+                row.addWidget(
+                    self.avatar,
+                    alignment=Qt.AlignmentFlag.AlignTop,
+                )
 
         self.bubble = QFrame()
         if status in {"failed", "cancelled", "interrupted"}:
@@ -209,14 +222,45 @@ class MessageBubble(QWidget):
         ):
             self.speech_button = QPushButton("播放")
             self.speech_button.setObjectName("messageActionButton")
-            self.speech_button.setMinimumHeight(44)
+            self.speech_button.setMinimumHeight(44 if self._mobile else 28)
             self.speech_button.setAccessibleName("播放这条 AI 回复")
             self.speech_button.clicked.connect(self._speech_action)
             body.addWidget(
                 self.speech_button, alignment=Qt.AlignmentFlag.AlignLeft
             )
 
-        row.addWidget(self.bubble)
+        self.message_column = QWidget()
+        self.message_column.setObjectName("messageColumn")
+        message_layout = QVBoxLayout(self.message_column)
+        message_layout.setContentsMargins(0, 0, 0, 0)
+        message_layout.setSpacing(4)
+        self.sender_label = None
+        if self._sender_name:
+            self.sender_label = QLabel(self._sender_name)
+            self.sender_label.setObjectName("messageSender")
+            self.sender_label.setToolTip(self._sender_name)
+            self.sender_label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
+            self.sender_label.setAccessibleName(
+                f"发送者：{self._sender_name}"
+            )
+            self.sender_label.setAlignment(
+                Qt.AlignmentFlag.AlignRight
+                if role == "user"
+                else Qt.AlignmentFlag.AlignLeft
+            )
+            message_layout.addWidget(self.sender_label)
+        message_layout.addWidget(self.bubble)
+        row.addWidget(
+            self.message_column,
+            alignment=Qt.AlignmentFlag.AlignTop,
+        )
+        if role == "user" and self.avatar is not None:
+            row.addWidget(
+                self.avatar,
+                alignment=Qt.AlignmentFlag.AlignTop,
+            )
         if role != "user":
             row.addStretch(1)
 
@@ -226,78 +270,77 @@ class MessageBubble(QWidget):
 
         return self._fixed_width or self.bubble.width() or 0
 
+    def _natural_bubble_width(self, minimum: int) -> int:
+        fallback = (
+            "表情"
+            if self._sticker is not None
+            else (self._text or "正在生成…")
+        )
+        lines = fallback.splitlines() or [""]
+        natural = max(
+            self.text_label.fontMetrics().horizontalAdvance(line)
+            for line in lines
+        ) + 32
+        if self._sticker is not None:
+            natural = max(natural, 112)
+        if self._image_preview_width:
+            natural = max(natural, self._image_preview_width + 24)
+        return max(minimum, natural)
+
     def set_chat_width(self, viewport_width: int) -> None:
         """根据聊天视口分配稳定且可读的气泡宽度。"""
 
         self._chat_width = max(0, viewport_width)
+        avatar_chrome = self.avatar.width() + 10 if self.avatar else 0
         if self._mobile:
-            available = max(120, viewport_width - 24)
-            if self._role == "user":
-                maximum = max(120, int(available * 0.82))
-                lines = (
-                    self._text
-                    or (
-                        "表情"
-                        if self._sticker is not None
-                        else "正在生成…"
-                    )
-                ).splitlines() or [""]
-                natural = max(
-                    self.text_label.fontMetrics().horizontalAdvance(line)
-                    for line in lines
-                ) + 32
-                if self._sticker is not None:
-                    natural = max(natural, 112)
-                width = min(maximum, max(120, natural))
-            else:
-                width = max(160, int(available * 0.90))
-                width = min(available, width)
+            available = max(120, viewport_width - 24 - avatar_chrome)
+            maximum = max(
+                120,
+                int(available * (0.82 if self._role == "user" else 0.90)),
+            )
+            width = min(
+                available,
+                min(maximum, self._natural_bubble_width(120)),
+            )
             self.bubble.setFixedWidth(width)
             self._fixed_width = width
             text_width = max(0, width - 24)
             self.text_label.setMinimumWidth(0)
             self.text_label.setMaximumWidth(text_width)
-            if self.image_label is not None and not self._source_pixmap.isNull():
-                preview = self._source_pixmap.scaled(
-                    min(420, text_width),
-                    min(420, text_width),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                self._image_preview_width = preview.width()
-                self.image_label.setPixmap(preview)
+            self._resize_image_preview(text_width)
             self.text_label.updateGeometry()
             self.bubble.updateGeometry()
             return
 
-        available = max(320, viewport_width - 40)
+        available = max(320, viewport_width - 40 - avatar_chrome)
         if self._role == "user":
-            maximum = max(220, available // 2)
-            lines = (
-                self._text
-                or ("表情" if self._sticker is not None else "正在生成…")
-            ).splitlines() or [""]
-            natural = max(
-                self.text_label.fontMetrics().horizontalAdvance(line)
-                for line in lines
-            ) + 32
-            if self._sticker is not None:
-                natural = max(natural, 112)
-            if self._image_preview_width:
-                natural = max(natural, self._image_preview_width + 24)
-            width = min(maximum, max(160, natural))
+            maximum = max(220, int(available * 0.56))
+            width = min(maximum, self._natural_bubble_width(160))
             self.bubble.setFixedWidth(width)
             self._fixed_width = width
             self.text_label.setMinimumWidth(max(136, width - 24))
             self.text_label.setMaximumWidth(max(136, width - 24))
         else:
-            width = min(900, max(420, int(available * 0.76)))
+            maximum = min(760, max(360, int(available * 0.68)))
+            width = min(maximum, self._natural_bubble_width(180))
             self.bubble.setFixedWidth(width)
             self._fixed_width = width
             self.text_label.setMinimumWidth(max(0, width - 24))
             self.text_label.setMaximumWidth(max(0, width - 24))
+        self._resize_image_preview(width - 24)
         self.text_label.updateGeometry()
         self.bubble.updateGeometry()
+
+    def _resize_image_preview(self, available_width: int) -> None:
+        if self.image_label is not None and not self._source_pixmap.isNull():
+            # 缩放始终基于原图，不覆盖自然宽度，以便窗口再次放大时恢复清晰预览。
+            edge = max(1, min(420, available_width))
+            self.image_label.setPixmap(self._source_pixmap.scaled(
+                edge,
+                edge,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
 
     def append_content(self, text: str) -> None:
         if self.text_label.text() in {

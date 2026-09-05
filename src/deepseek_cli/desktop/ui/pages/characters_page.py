@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -27,6 +29,7 @@ from ...data.repositories import (
 from ...platform import is_android_platform
 from ..character_editor_dialog import CharacterEditorDialog
 from ..file_dialogs import open_mobile_file_dialog
+from ..icons import line_icon
 from ..mobile import enable_touch_scrolling
 from ..relationship_policy_dialog import RelationshipPolicyDialog
 from ..widgets.avatar_widget import AvatarWidget
@@ -145,8 +148,7 @@ class CharactersPage(QWidget):
         header.addWidget(title)
         header.addStretch(1)
         for label, handler in (
-            ("新建", self._create),
-            ("导入" if self._mobile else "导入 JSON", self._import),
+            ("＋ 新建", self._create),
             ("开始聊天", self._start_chat),
         ):
             button = QPushButton(label)
@@ -155,41 +157,42 @@ class CharactersPage(QWidget):
             button.setMinimumHeight(42)
             button.clicked.connect(handler)
             header.addWidget(button)
-        layout.addLayout(header)
-
-        actions = QHBoxLayout()
-        if not self._mobile:
-            actions.addStretch(1)
+        self.manage_menu = QMenu(self)
         action_specs = (
-            ("编辑", self._edit),
-            (
-                "联系策略" if self._mobile else "关系与联系",
-                self._relationship_policy,
-            ),
-            ("复制", self._duplicate),
-            ("导出", self._export),
-            ("删除", self._delete),
+            ("导入角色卡", self._import),
+            ("编辑所选角色", self._edit),
+            ("关系与联系", self._relationship_policy),
+            ("复制角色", self._duplicate),
+            ("导出角色卡", self._export),
         )
-        for index, (label, handler) in enumerate(action_specs):
-            button = QPushButton(label)
-            button.setObjectName(
-                "dangerButton" if label == "删除" else "quietButton"
+        for label, handler in action_specs:
+            action = QAction(label, self)
+            action.triggered.connect(
+                lambda _checked=False, callback=handler: callback()
             )
-            button.setMinimumHeight(42)
-            button.clicked.connect(handler)
-            actions.addWidget(button, 1 if self._mobile else 0)
-            if self._mobile and index == 2:
-                layout.addLayout(actions)
-                actions = QHBoxLayout()
-        self.restore_button = QPushButton(
-            "恢复内置" if self._mobile else "恢复内置角色"
+            self.manage_menu.addAction(action)
+        self.restore_action = QAction("恢复内置角色", self)
+        self.restore_action.setEnabled(builtins is not None)
+        self.restore_action.triggered.connect(
+            lambda _checked=False: self._restore_builtins()
         )
-        self.restore_button.setAccessibleName("恢复缺失的内置角色")
-        self.restore_button.setMinimumHeight(42)
-        self.restore_button.setEnabled(builtins is not None)
-        self.restore_button.clicked.connect(self._restore_builtins)
-        actions.addWidget(self.restore_button, 1 if self._mobile else 0)
-        layout.addLayout(actions)
+        self.manage_menu.addAction(self.restore_action)
+        self.manage_menu.addSeparator()
+        delete_action = QAction("删除所选角色", self)
+        delete_action.triggered.connect(
+            lambda _checked=False: self._delete()
+        )
+        self.manage_menu.addAction(delete_action)
+        self.manage_button = QPushButton()
+        self.manage_button.setObjectName("headerMenuButton")
+        self.manage_button.setIcon(line_icon("more"))
+        self.manage_button.setIconSize(QSize(24, 24))
+        self.manage_button.setFixedSize(44, 44)
+        self.manage_button.setAccessibleName("更多角色操作")
+        self.manage_button.setToolTip("更多角色操作")
+        self.manage_button.setMenu(self.manage_menu)
+        header.addWidget(self.manage_button)
+        layout.addLayout(header)
 
         self.search = QLineEdit()
         self.search.setObjectName("searchInput")

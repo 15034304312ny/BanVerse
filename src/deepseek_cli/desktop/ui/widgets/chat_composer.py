@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, Qt, Signal, qWarning
+from PySide6.QtCore import QEvent, QSize, Qt, Signal, qWarning
 from PySide6.QtGui import QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from ...assets import AvatarError, load_chat_image
 from ...platform import is_android_platform
 from ..file_dialogs import open_mobile_file_dialog
+from ..icons import line_icon
 from .sticker_picker import StickerPickerDialog
 
 
@@ -35,9 +36,9 @@ class ChatComposer(QFrame):
         self._sticker_dialog: StickerPickerDialog | None = None
         root = QVBoxLayout(self)
         root.setContentsMargins(
-            12 if self._mobile else 20,
+            8 if self._mobile else 18,
             8 if self._mobile else 10,
-            12 if self._mobile else 20,
+            8 if self._mobile else 18,
             8 if self._mobile else 12,
         )
         root.setSpacing(8)
@@ -45,7 +46,7 @@ class ChatComposer(QFrame):
         self.attachment_row = QFrame()
         self.attachment_row.setObjectName("attachmentCard")
         attachment_layout = QHBoxLayout(self.attachment_row)
-        attachment_layout.setContentsMargins(0, 0, 0, 0)
+        attachment_layout.setContentsMargins(10, 8, 10, 8)
         attachment_layout.setSpacing(8)
         self.attachment_preview = QLabel()
         self.attachment_preview.setObjectName("attachmentPreview")
@@ -64,16 +65,21 @@ class ChatComposer(QFrame):
         root.addWidget(self.attachment_row)
         self.attachment_row.hide()
 
-        self.attach_button = QPushButton("图片")
+        self.attach_button = QPushButton()
         self.attach_button.setObjectName("composerToolButton")
+        self.attach_button.setIcon(line_icon("add"))
+        self.attach_button.setIconSize(QSize(24, 24))
         self.attach_button.setAccessibleName("选择要发送的图片")
-        self.attach_button.setMinimumSize(64 if self._mobile else 62, 44)
+        self.attach_button.setToolTip("发送图片")
+        self.attach_button.setFixedSize(44, 44)
         self.attach_button.clicked.connect(self._choose_attachment)
-        self.sticker_button = QPushButton("表情")
+        self.sticker_button = QPushButton()
         self.sticker_button.setObjectName("composerToolButton")
+        self.sticker_button.setIcon(line_icon("smile"))
+        self.sticker_button.setIconSize(QSize(24, 24))
         self.sticker_button.setAccessibleName("打开表情包")
         self.sticker_button.setToolTip("选择并直接发送表情")
-        self.sticker_button.setMinimumSize(64 if self._mobile else 62, 44)
+        self.sticker_button.setFixedSize(44, 44)
         self.sticker_button.clicked.connect(self._choose_sticker)
 
         self.editor = QTextEdit()
@@ -84,43 +90,34 @@ class ChatComposer(QFrame):
             else "输入消息，Enter 发送，Shift+Enter 换行"
         )
         self.editor.setAccessibleName("消息输入框")
-        self.editor.setFixedHeight(52 if self._mobile else 72)
+        self.editor.setFixedHeight(48 if self._mobile else 58)
         self.editor.installEventFilter(self)
         self.editor.textChanged.connect(self._update_button)
 
         self.action = QPushButton("发送")
         self.action.setObjectName("primaryButton")
-        self.action.setMinimumSize(80 if self._mobile else 72, 44)
+        self.action.setMinimumSize(62 if self._mobile else 72, 44)
         self.action.setAccessibleName("发送消息")
         self.action.clicked.connect(self._activate)
-        if self._mobile:
-            root.addWidget(self.editor)
-            actions = QHBoxLayout()
-            actions.setContentsMargins(0, 0, 0, 0)
-            actions.setSpacing(8)
-            actions.addWidget(self.attach_button)
-            actions.addWidget(self.sticker_button)
-            actions.addStretch(1)
-            actions.addWidget(self.action)
-            root.addLayout(actions)
-        else:
-            layout = QHBoxLayout()
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-            layout.addWidget(
-                self.attach_button,
-                alignment=Qt.AlignmentFlag.AlignBottom,
-            )
-            layout.addWidget(
-                self.sticker_button,
-                alignment=Qt.AlignmentFlag.AlignBottom,
-            )
-            layout.addWidget(self.editor, 1)
-            layout.addWidget(
-                self.action,
-                alignment=Qt.AlignmentFlag.AlignBottom,
-            )
-            root.addLayout(layout)
+        self.shell = QFrame()
+        self.shell.setObjectName("composerShell")
+        layout = QHBoxLayout(self.shell)
+        layout.setContentsMargins(5, 4, 5, 4)
+        layout.setSpacing(4 if self._mobile else 6)
+        layout.addWidget(
+            self.attach_button,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+        layout.addWidget(self.editor, 1)
+        layout.addWidget(
+            self.sticker_button,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+        layout.addWidget(
+            self.action,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+        root.addWidget(self.shell)
         self._update_button()
 
     def eventFilter(self, watched, event) -> bool:
